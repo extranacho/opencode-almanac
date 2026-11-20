@@ -74,9 +74,23 @@ your-project/
 ```
 
 - `day` is 1–31 and `hour` 0–23, local time.
-- **29, 30 and 31 mean the last day of a shorter month**: `day: 31` fires on
-  28 February and 30 April, not on a skipped month and not on 3 March. Days 1–28 are
-  never moved.
+- **29, 30 and 31 mean the last day of a shorter month.** The job still runs every
+  month; only the date moves:
+
+  | Month | `day: 31` fires on | `day: 30` fires on |
+  | --- | --- | --- |
+  | 31 days | the 31st | the 30th |
+  | 30 days | the 30th | the 30th |
+  | 28 days (February) | the 28th | the 28th |
+  | 29 days (leap February) | the 29th | the 29th |
+
+  Days 1–28 are never moved. Nothing is skipped and nothing rolls into the next
+  month — a naive `new Date(y, 1, 31)` becomes 3 March, which is why the date is
+  clamped before it is built.
+- A clamped run still counts as that month's run, and the log says so:
+  `waiting for day 28 (day 31 clamped to 28)`.
+- Two jobs can land on the same date: `day: 28` and `day: 31` both fire on
+  28 February. Jobs are independent, each with its own monthly claim.
 - `catchUpDays` is how many days late a missed run may still fire. `0` means
   strictly that day.
 - `promptFile` is relative to `jobs.json`; a `prompt` string works too.

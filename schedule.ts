@@ -4,7 +4,7 @@
 
 export interface Job {
   id: string;
-  /** Day of the month, 1-28. */
+  /** Day of the month, 1-31. 29-31 clamp to the last day of a shorter month. */
   day: number;
   /** Local hour, 0-23. */
   hour: number;
