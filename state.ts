@@ -6,7 +6,7 @@
 // ticker is about to do. The cost is a poll interval, which for a monthly
 // scheduler is not a cost at all.
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { monthKey, type Job } from "./schedule.ts";
 
@@ -291,4 +291,85 @@ function sessionsFor(
     out.push({ sessionID: claim.sessionID, at: claim.startedAt ?? "", reason: "scheduled" });
   }
   return out.slice(0, 25);
+}
+
+/** The file as written, before prompts are expanded. */
+export interface JobFile {
+  version: number;
+  jobs: JobInput[];
+}
+
+export interface JobInput {
+  id: string;
+  label?: string;
+  day: number;
+  hour: number;
+  minute?: number;
+  catchUpDays?: number;
+  agent?: string;
+  promptFile?: string;
+  prompt?: string;
+}
+
+export function readJobFile(jobsPath: string): JobFile {
+  if (!existsSync(jobsPath)) return { version: 1, jobs: [] };
+  const parsed = JSON.parse(readFileSync(jobsPath, "utf8")) as JobFile;
+  return { version: parsed?.version ?? 1, jobs: Array.isArray(parsed?.jobs) ? parsed.jobs : [] };
+}
+
+/**
+ * Why a job would be rejected, or null when it is fine.
+ *
+ * `day` stops at 28 because no month is guaranteed to have a 29th; a job on the
+ * 31st would fire in some months and silently skip others, which is worse than
+ * refusing it. A prompt that does not exist is rejected for the same reason: it
+ * would dispatch an empty message once a month and look like it worked.
+ */
+export function validateJob(jobsPath: string, input: JobInput, existing: JobInput[] = []): string | null {
+  if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(String(input.id ?? ""))) {
+    return "id must be lower-case letters, digits and dashes, starting with a letter or digit";
+  }
+  if (existing.some((job) => job.id === input.id)) return `a job with id "${input.id}" already exists`;
+  if (!Number.isInteger(input.day) || input.day < 1 || input.day > 28) {
+    return "day must be a whole number from 1 to 28 — no month is guaranteed to have a 29th";
+  }
+  if (!Number.isInteger(input.hour) || input.hour < 0 || input.hour > 23) return "hour must be 0 to 23";
+  if (input.minute !== undefined && (!Number.isInteger(input.minute) || input.minute < 0 || input.minute > 59)) {
+    return "minute must be 0 to 59";
+  }
+  if (input.catchUpDays !== undefined && (!Number.isInteger(input.catchUpDays) || input.catchUpDays < 0 || input.catchUpDays > 31)) {
+    return "catchUpDays must be a whole number from 0 to 31";
+  }
+  if (!input.prompt && !input.promptFile) return "give either a prompt string or a promptFile";
+  if (input.promptFile) {
+    const file = path.isAbsolute(input.promptFile) ? input.promptFile : path.join(path.dirname(jobsPath), input.promptFile);
+    if (!existsSync(file)) return `promptFile not found: ${input.promptFile}`;
+  }
+  return null;
+}
+
+function writeJobFile(jobsPath: string, file: JobFile): void {
+  mkdirSync(path.dirname(jobsPath), { recursive: true });
+  // Write beside the file and rename, so a crash mid-write cannot leave a schedule
+  // that fails to parse — which would read as "no jobs" and stop the ticker.
+  const temp = `${jobsPath}.tmp`;
+  writeFileSync(temp, `${JSON.stringify(file, null, 2)}\n`);
+  renameSync(temp, jobsPath);
+}
+
+export function addJob(jobsPath: string, input: JobInput): { ok: true; jobs: number } | { ok: false; error: string } {
+  const file = readJobFile(jobsPath);
+  const problem = validateJob(jobsPath, input, file.jobs);
+  if (problem) return { ok: false, error: problem };
+  file.jobs.push(input);
+  writeJobFile(jobsPath, file);
+  return { ok: true, jobs: file.jobs.length };
+}
+
+export function removeJob(jobsPath: string, id: string): { ok: boolean; error?: string; jobs?: number } {
+  const file = readJobFile(jobsPath);
+  const next = file.jobs.filter((job) => job.id !== id);
+  if (next.length === file.jobs.length) return { ok: false, error: `no job with id "${id}"` };
+  writeJobFile(jobsPath, { ...file, jobs: next });
+  return { ok: true, jobs: next.length };
 }

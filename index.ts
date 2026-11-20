@@ -20,7 +20,7 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, unlinkSync,
 import path from "node:path";
 import { Plugin } from "@opencode/plugin";
 import { describeNext, evaluate, monthKey } from "./schedule.ts";
-import { claimFile, consumeRunRequest, describeJobs, isPaused, loadJobs, readClaim, recordRun, requestRun, resolveJobsFile, setPaused } from "./state.ts";
+import { addJob, claimFile, consumeRunRequest, describeJobs, isPaused, loadJobs, readClaim, recordRun, removeJob, requestRun, resolveJobsFile, setPaused } from "./state.ts";
 import { Almanac } from "./rpc.ts";
 
 const TICK_MS = 60_000;
@@ -174,6 +174,19 @@ export default Plugin.define({
         await rpc.events.emit("changed", {});
         return { ok: true };
       },
+      addJob: async (input) => {
+        const result = addJob(jobsPath, input as never);
+        log(result.ok ? `job added: ${(input as { id: string }).id}` : `job rejected: ${result.error}`);
+        if (result.ok) await rpc.events.emit("changed", {});
+        return result;
+      },
+      removeJob: async (input) => {
+        const { id } = input as { id: string };
+        const result = removeJob(jobsPath, id);
+        log(result.ok ? `job removed: ${id}` : `remove rejected: ${result.error}`);
+        if (result.ok) await rpc.events.emit("changed", {});
+        return result;
+      },
       runNow: async (input) => {
         const { id } = input as { id: string };
         requestRun(target, id);
@@ -181,6 +194,71 @@ export default Plugin.define({
         await rpc.events.emit("changed", {});
         return { queued: true };
       },
+    });
+
+    // A tool, so an agent can schedule work from a session instead of hand-editing
+    // JSON — and gets the validation rather than a schedule that silently never
+    // fires. Same code as the RPC.
+    await ctx.tool.transform((editor) => {
+      editor.add({
+        name: "almanac_schedule",
+        description: [
+          "Add, remove or list scheduled agent runs in the almanac plugin.",
+          `The schedule is ${jobsPath}.`,
+          "actions: 'list', 'add', 'remove'.",
+          "For 'add': day 1-28 (no month is guaranteed to have a 29th), hour 0-23, minute 0-59,",
+          "catchUpDays 0-31 (how late a missed run may still fire), optional agent name,",
+          "and one of prompt (a string) or promptFile (relative to the jobs file, and it must exist).",
+        ].join(" "),
+        input: {
+          type: "object",
+          properties: {
+            action: { type: "string", enum: ["list", "add", "remove"] },
+            id: { type: "string" },
+            label: { type: "string" },
+            day: { type: "number" },
+            hour: { type: "number" },
+            minute: { type: "number" },
+            catchUpDays: { type: "number" },
+            agent: { type: "string" },
+            promptFile: { type: "string" },
+            prompt: { type: "string" },
+          },
+          required: ["action"],
+          additionalProperties: false,
+        },
+        execute: async (input) => {
+          const request = input as Record<string, string | number> & { action: string };
+          if (request.action === "list") {
+            const jobs = loadJobs(jobsPath);
+            if (!jobs.length) return { content: `No jobs scheduled in ${jobsPath}` };
+            return {
+              content: jobs
+                .map(
+                  (job) =>
+                    `${job.id} — day ${job.day} at ${String(job.hour).padStart(2, "0")}:${String(job.minute ?? 0).padStart(2, "0")}, catch-up ${job.catchUpDays ?? 0}d${job.agent ? `, agent ${job.agent}` : ""}`,
+                )
+                .join("\n"),
+            };
+          }
+          if (request.action === "add") {
+            const result = addJob(jobsPath, request as never);
+            log(result.ok ? `job added via tool: ${request.id}` : `tool add rejected: ${result.error}`);
+            if (result.ok) await rpc.events.emit("changed", {});
+            return {
+              content: result.ok
+                ? `Added ${request.id}. ${result.jobs} job(s) scheduled. It is live within a minute — no reload.`
+                : `Rejected: ${result.error}`,
+            };
+          }
+          const result = removeJob(jobsPath, String(request.id ?? ""));
+          log(result.ok ? `job removed via tool: ${request.id}` : `tool remove rejected: ${result.error}`);
+          if (result.ok) await rpc.events.emit("changed", {});
+          return {
+            content: result.ok ? `Removed ${request.id}. ${result.jobs} job(s) left.` : `Rejected: ${result.error}`,
+          };
+        },
+      });
     });
 
     // Status, so "is it alive" is answerable without reading files.

@@ -65,6 +65,45 @@ export const Almanac = Rpc.define({
     },
     pause: { input: One, output: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } },
     resume: { input: One, output: { type: "object", properties: { ok: { type: "boolean" } }, required: ["ok"] } },
+    addJob: {
+      input: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          label: { type: "string" },
+          day: { type: "number" },
+          hour: { type: "number" },
+          minute: { type: "number" },
+          catchUpDays: { type: "number" },
+          agent: { type: "string" },
+          promptFile: { type: "string" },
+          prompt: { type: "string" },
+        },
+        required: ["id", "day", "hour"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          jobs: { type: "number" },
+          error: { type: "string" },
+        },
+        required: ["ok"],
+      },
+    },
+    removeJob: {
+      input: One,
+      output: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" },
+          jobs: { type: "number" },
+          error: { type: "string" },
+        },
+        required: ["ok"],
+      },
+    },
     runNow: {
       input: One,
       output: { type: "object", properties: { queued: { type: "boolean" } }, required: ["queued"] },

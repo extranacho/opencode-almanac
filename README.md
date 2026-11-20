@@ -80,6 +80,60 @@ your-project/
 - `agent` is optional — it names the agent the session runs as.
 - `jobs.example.json` shows the same shape.
 
+The file is re-read on every tick, so an edit is live within a minute — no reload,
+no restart. Changes appear in the panel on its next refresh.
+
+## Letting an agent schedule work
+
+The plugin registers a tool, `almanac_schedule`, so an agent can add, remove or list
+jobs from inside a session instead of hand-editing JSON. It validates rather than
+trusting the request — a day no month is guaranteed to have, a missing `promptFile`
+or a duplicate id are all refused with a reason.
+
+Ask for it in plain language:
+
+> Schedule a job called "changelog refresh" on the 15th at 09:00, using the `build`
+> agent, that updates CHANGELOG.md since the last tag. Put the prompt in its own
+> file.
+
+The agent then calls:
+
+```jsonc
+almanac_schedule({
+  action: "add",
+  id: "changelog-refresh",
+  label: "Changelog refresh",
+  day: 15,
+  hour: 9,
+  catchUpDays: 2,
+  agent: "build",
+  promptFile: "prompts/changelog.md"
+})
+```
+
+`action: "list"` returns the current schedule, `action: "remove"` with an `id` drops
+one. Writes are atomic (temp file plus rename), so a crash mid-write cannot leave a
+schedule that fails to parse — which would read as "no jobs" and silently stop the
+ticker.
+
+## RPC
+
+The same operations are available over HTTP for anything outside OpenCode:
+
+| Method | Input | Does |
+| --- | --- | --- |
+| `list` | — | every job with its state and run history |
+| `pause` / `resume` | `{ id }` | one job |
+| `runNow` | `{ id }` | queues a dispatch, picked up within a minute |
+| `addJob` | `{ id, day, hour, ... }` | validated add |
+| `removeJob` | `{ id }` | removes one |
+
+```bash
+opencode api post /api/rpc/almanac/list --data '{"input":{}}'
+```
+
+There is also a `changed` event, emitted whenever the schedule or a run changes.
+
 ## The UI
 
 A **titlebar pill** shows the next run, or `paused`. Clicking it opens the panel,

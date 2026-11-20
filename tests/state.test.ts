@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { formatWhen, loadJobs, nextRun, readPaused, resolveJobsFile, setPaused, summarise } from "../state.ts";
+import { addJob, formatWhen, loadJobs, nextRun, readJobFile, readPaused, removeJob, resolveJobsFile, setPaused, summarise } from "../state.ts";
 
 const job = { id: "batch", day: 1, hour: 8, minute: 0, catchUpDays: 30, prompt: "" };
 
@@ -88,5 +88,60 @@ describe("jobs file location", () => {
     );
     const loaded = loadJobs(path.join(repo, ".opencode/almanac/jobs.json"));
     expect(loaded[0].prompt).toBe("from the repo");
+  });
+});
+
+describe("adding and removing jobs", () => {
+  const base = { id: "report", day: 15, hour: 9 } as const;
+
+  function fresh(): string {
+    const repo = mkdtempSync(path.join(tmpdir(), "almanac-repo-"));
+    mkdirSync(path.join(repo, ".opencode/almanac"), { recursive: true });
+    writeFileSync(path.join(repo, ".opencode/almanac/jobs.json"), JSON.stringify({ version: 1, jobs: [] }));
+    return path.join(repo, ".opencode/almanac/jobs.json");
+  }
+
+  it("round-trips through the file and refuses duplicates", () => {
+    const file = fresh();
+    expect(addJob(file, { ...base, prompt: "do it" })).toEqual({ ok: true, jobs: 1 });
+    expect(readJobFile(file).jobs[0].id).toBe("report");
+    const again = addJob(file, { ...base, prompt: "do it" });
+    expect(again.ok).toBe(false);
+    expect(removeJob(file, "report").ok).toBe(true);
+    expect(readJobFile(file).jobs).toHaveLength(0);
+  });
+
+  it("refuses a day no month is guaranteed to have", () => {
+    const file = fresh();
+    const result = addJob(file, { ...base, day: 31, prompt: "x" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("1 to 28");
+  });
+
+  it("refuses a promptFile that does not exist", () => {
+    const file = fresh();
+    const result = addJob(file, { ...base, promptFile: "prompts/missing.md" });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("not found");
+  });
+
+  it("accepts a promptFile that exists beside the jobs file", () => {
+    const file = fresh();
+    mkdirSync(path.join(path.dirname(file), "prompts"), { recursive: true });
+    writeFileSync(path.join(path.dirname(file), "prompts", "run.md"), "go\n");
+    expect(addJob(file, { ...base, promptFile: "prompts/run.md" }).ok).toBe(true);
+    expect(loadJobs(file)[0].prompt).toBe("go");
+  });
+
+  it("reports a missing id on remove instead of writing", () => {
+    const file = fresh();
+    const result = removeJob(file, "nope");
+    expect(result.ok).toBe(false);
+    expect(result.error).toContain("no job with id");
+  });
+
+  it("rejects an id that is not a slug", () => {
+    const file = fresh();
+    expect(addJob(file, { ...base, id: "Bad Id", prompt: "x" }).ok).toBe(false);
   });
 });
