@@ -28,6 +28,24 @@ export interface Decision {
   key: string;
 }
 
+/** Length of a month, with the month index normalised so 12 means next January. */
+export function daysInMonth(year: number, monthIndex: number): number {
+  const first = new Date(year, monthIndex, 1);
+  return new Date(first.getFullYear(), first.getMonth() + 1, 0).getDate();
+}
+
+/**
+ * The day a job actually fires on in a given month.
+ *
+ * 29, 30 and 31 mean "the last day" in a month that is too short — 31 in February is
+ * the 28th, 30 in April is the 30th. Never construct the date first: `new Date(y, 1,
+ * 31)` does not error, it rolls into March, which would fire on the wrong day rather
+ * than the last one.
+ */
+export function effectiveDay(day: number, year: number, monthIndex: number): number {
+  return Math.min(day, daysInMonth(year, monthIndex));
+}
+
 export function monthKey(job: Job, now: Date): string {
   const month = String(now.getMonth() + 1).padStart(2, "0");
   return `${job.id}/${now.getFullYear()}-${month}`;
@@ -45,23 +63,30 @@ export function evaluate(job: Job, now: Date, lastRun: string | undefined): Deci
   if (lastRun === key) return { due: false, reason: "already ran this month", key };
 
   const day = now.getDate();
-  if (day < job.day) return { due: false, reason: `waiting for day ${job.day}`, key };
-  if (day === job.day && now.getHours() < job.hour) {
+  const target = effectiveDay(job.day, now.getFullYear(), now.getMonth());
+  const clamped = target !== job.day ? ` (day ${job.day} clamped to ${target})` : "";
+
+  if (day < target) return { due: false, reason: `waiting for day ${target}${clamped}`, key };
+  if (day === target && now.getHours() < job.hour) {
     return { due: false, reason: `waiting for ${String(job.hour).padStart(2, "0")}:00`, key };
   }
-  if (day > job.day + job.catchUpDays) {
-    return { due: false, reason: `window closed after day ${job.day + job.catchUpDays}`, key };
+  if (day > target + job.catchUpDays) {
+    return { due: false, reason: `window closed after day ${target + job.catchUpDays}${clamped}`, key };
   }
-  return { due: true, reason: day === job.day ? "due" : `late, catching up from day ${job.day}`, key };
+  return { due: true, reason: day === target ? "due" : `late, catching up from day ${target}${clamped}`, key };
 }
 
 /** Human-readable next run, for the startup log and the status command. */
 export function describeNext(job: Job, now: Date): string {
   if (evaluate(job, now, undefined).due) return "due now";
-  const thisMonth = new Date(now.getFullYear(), now.getMonth(), job.day, job.hour, 0, 0, 0);
-  const next =
-    thisMonth.getTime() > now.getTime()
-      ? thisMonth
-      : new Date(now.getFullYear(), now.getMonth() + 1, job.day, job.hour, 0, 0, 0);
+  const at = (year: number, monthIndex: number) => {
+    const first = new Date(year, monthIndex, 1);
+    const y = first.getFullYear();
+    const m = first.getMonth();
+    return new Date(y, m, effectiveDay(job.day, y, m), job.hour, job.minute ?? 0, 0, 0);
+  };
+
+  let next = at(now.getFullYear(), now.getMonth());
+  if (next.getTime() <= now.getTime()) next = at(now.getFullYear(), now.getMonth() + 1);
   return next.toLocaleString("en-GB", { dateStyle: "medium", timeStyle: "short" });
 }

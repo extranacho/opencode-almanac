@@ -206,7 +206,7 @@ export default Plugin.define({
           "Add, remove or list scheduled agent runs in the almanac plugin.",
           `The schedule is ${jobsPath}.`,
           "actions: 'list', 'add', 'remove'.",
-          "For 'add': day 1-28 (no month is guaranteed to have a 29th), hour 0-23, minute 0-59,",
+          "For 'add': day 1-31 (29-31 mean the last day of a shorter month), hour 0-23, minute 0-59,",
           "catchUpDays 0-31 (how late a missed run may still fire), optional agent name,",
           "and one of prompt (a string) or promptFile (relative to the jobs file, and it must exist).",
         ].join(" "),

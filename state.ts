@@ -8,7 +8,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { monthKey, type Job } from "./schedule.ts";
+import { effectiveDay, monthKey, type Job } from "./schedule.ts";
 
 /** As written in jobs.json: a prompt inline, or a file beside it. */
 export interface JobConfig extends Job {
@@ -167,7 +167,18 @@ export function summarise(target: string, jobs: JobConfig[], now = new Date()): 
 export function nextRun(job: Job, now: Date, lastRun?: string): Date | null {
   const month = lastRun ? now.getMonth() + 1 : now.getMonth();
   for (let i = 0; i < 2; i++) {
-    const candidate = new Date(now.getFullYear(), month + i, job.day, job.hour ?? 0, job.minute ?? 0, 0, 0);
+    // Clamp through effectiveDay rather than letting the Date constructor roll a
+    // 31st into the next month.
+    const first = new Date(now.getFullYear(), month + i, 1);
+    const candidate = new Date(
+      first.getFullYear(),
+      first.getMonth(),
+      effectiveDay(job.day, first.getFullYear(), first.getMonth()),
+      job.hour ?? 0,
+      job.minute ?? 0,
+      0,
+      0,
+    );
     if (candidate.getTime() > now.getTime()) return candidate;
   }
   return null;
@@ -330,8 +341,8 @@ export function validateJob(jobsPath: string, input: JobInput, existing: JobInpu
     return "id must be lower-case letters, digits and dashes, starting with a letter or digit";
   }
   if (existing.some((job) => job.id === input.id)) return `a job with id "${input.id}" already exists`;
-  if (!Number.isInteger(input.day) || input.day < 1 || input.day > 28) {
-    return "day must be a whole number from 1 to 28 — no month is guaranteed to have a 29th";
+  if (!Number.isInteger(input.day) || input.day < 1 || input.day > 31) {
+    return "day must be a whole number from 1 to 31 (29-31 clamp to the last day of a shorter month)";
   }
   if (!Number.isInteger(input.hour) || input.hour < 0 || input.hour > 23) return "hour must be 0 to 23";
   if (input.minute !== undefined && (!Number.isInteger(input.minute) || input.minute < 0 || input.minute > 59)) {

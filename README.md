@@ -73,7 +73,10 @@ your-project/
 }
 ```
 
-- `day` is 1–28, `hour` 0–23, local time.
+- `day` is 1–31 and `hour` 0–23, local time.
+- **29, 30 and 31 mean the last day of a shorter month**: `day: 31` fires on
+  28 February and 30 April, not on a skipped month and not on 3 March. Days 1–28 are
+  never moved.
 - `catchUpDays` is how many days late a missed run may still fire. `0` means
   strictly that day.
 - `promptFile` is relative to `jobs.json`; a `prompt` string works too.

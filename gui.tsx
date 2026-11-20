@@ -209,7 +209,9 @@ function View(props: {
               <div style={{ display: "flex", "align-items": "baseline", gap: "6px" }}>
                 <strong>{job.label}</strong>
                 <span style={{ opacity: 0.65 }}>
-                  day {job.day} at {clock(job)} · {job.paused ? "paused" : job.ranThisMonth ? "ran this month" : "scheduled"}
+                  day {job.day}
+                  {job.day > 28 ? " or last" : ""} at {clock(job)} ·{" "}
+                  {job.paused ? "paused" : job.ranThisMonth ? "ran this month" : "scheduled"}
                 </span>
               </div>
               <div style={{ opacity: 0.65, "margin-bottom": "4px" }}>

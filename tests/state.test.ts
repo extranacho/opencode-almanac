@@ -111,11 +111,12 @@ describe("adding and removing jobs", () => {
     expect(readJobFile(file).jobs).toHaveLength(0);
   });
 
-  it("refuses a day no month is guaranteed to have", () => {
+  it("accepts 31, which clamps, and refuses 32", () => {
     const file = fresh();
-    const result = addJob(file, { ...base, day: 31, prompt: "x" });
-    expect(result.ok).toBe(false);
-    if (!result.ok) expect(result.error).toContain("1 to 28");
+    expect(addJob(file, { ...base, id: "end", day: 31, prompt: "x" }).ok).toBe(true);
+    const tooBig = addJob(file, { ...base, id: "big", day: 32, prompt: "x" });
+    expect(tooBig.ok).toBe(false);
+    if (!tooBig.ok) expect(tooBig.error).toContain("1 to 31");
   });
 
   it("refuses a promptFile that does not exist", () => {
@@ -143,5 +144,19 @@ describe("adding and removing jobs", () => {
   it("rejects an id that is not a slug", () => {
     const file = fresh();
     expect(addJob(file, { ...base, id: "Bad Id", prompt: "x" }).ok).toBe(false);
+  });
+});
+
+describe("next run with a clamped day", () => {
+  it("takes April's 31st to the 30th", () => {
+    expect(nextRun({ id: "end", day: 31, hour: 8, minute: 0, catchUpDays: 0, prompt: "" }, at(2027, 4, 29))).toEqual(
+      at(2027, 4, 30, 8),
+    );
+  });
+
+  it("takes February's 29th to the 28th outside a leap year, and keeps it in one", () => {
+    const job29 = { id: "end", day: 29, hour: 8, minute: 0, catchUpDays: 0, prompt: "" };
+    expect(nextRun(job29, at(2027, 2, 10))).toEqual(at(2027, 2, 28, 8));
+    expect(nextRun(job29, at(2028, 2, 10))).toEqual(at(2028, 2, 29, 8));
   });
 });
