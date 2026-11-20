@@ -1,0 +1,28 @@
+{
+  "name": "opencode-almanac",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "OpenCode plugin: run an agent session on a day and hour, with a desktop panel to pause it.",
+  "license": "MIT",
+  "exports": {
+    ".": "./index.ts",
+    "./rpc": "./rpc.ts",
+    "./gui-experimental": "./dist/gui-experimental.cjs"
+  },
+  "files": ["index.ts", "rpc.ts", "schedule.ts", "state.ts", "dist", "jobs.json", "jobs.example.json"],
+  "scripts": {
+    "build": "vite build",
+    "test": "vitest run",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "@opencode/plugin": "*"
+  },
+  "devDependencies": {
+    "vite": "^7.0.0",
+    "vite-plugin-solid": "^2.11.0",
+    "solid-js": "^1.9.0",
+    "vitest": "^3.2.4"
+  }
+}

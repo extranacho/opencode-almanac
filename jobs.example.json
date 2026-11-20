@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "nightly-digest",
+      "label": "Nightly digest",
+      "day": 1,
+      "hour": 8,
+      "minute": 0,
+      "catchUpDays": 30,
+      "agent": "build",
+      "promptFile": "prompts/digest.md"
+    }
+  ]
+}
