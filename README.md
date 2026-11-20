@@ -15,7 +15,7 @@ an hour and a number of days it may still run late.
 From git — no npm account needed:
 
 ```bash
-opencode plugin add "github:extranacho/opencode-almanac#v0.1.0"
+opencode plugin add "github:extranacho/opencode-almanac#v0.3.1"
 ```
 
 Or add it by hand to your **global** `~/.config/opencode/opencode.jsonc`, which is
@@ -25,7 +25,7 @@ what makes the desktop UI available in every window:
 {
   "plugins": [
     {
-      "package": "github:extranacho/opencode-almanac#v0.1.0",
+      "package": "github:extranacho/opencode-almanac#v0.3.1",
       "options": {
         "repo": "/absolute/path/to/your/project",
         "jobsFile": ".opencode/almanac/jobs.json"

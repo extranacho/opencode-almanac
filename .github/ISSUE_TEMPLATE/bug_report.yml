@@ -1,0 +1,88 @@
+name: Bug report
+description: Something scheduled wrongly, did not fire, or the panel misbehaved
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: check `.run/almanac/almanac.log` in the project you pointed
+        `options.repo` at. It records every tick, dispatch and rejection, and most
+        "it never ran" reports are answered there.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what it did instead.
+    validations:
+      required: true
+
+  - type: input
+    id: expected-when
+    attributes:
+      label: When it should have fired
+      description: The date and time you expected a run, in your local time.
+      placeholder: 1 Dec 2026, 08:00
+    validations:
+      required: false
+
+  - type: textarea
+    id: jobs
+    attributes:
+      label: Your jobs.json
+      description: Remove anything private. The schedule is the first thing to check.
+      render: json
+    validations:
+      required: true
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version or tag
+      placeholder: v0.3.1
+    validations:
+      required: true
+
+  - type: input
+    id: opencode-version
+    attributes:
+      label: OpenCode version
+      description: From the app's About, or `opencode --version`.
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: macOS 15.2
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where you see it
+      options:
+        - Desktop app
+        - Terminal CLI
+        - Both
+        - Neither — the job just never ran
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Relevant log lines
+      description: From `.run/almanac/almanac.log`. A few lines around the time in question.
+      render: text
+    validations:
+      required: false
+
+  - type: markdown
+    attributes:
+      value: |
+        Reminder: the GUI plugin API is experimental and the plugin is only tested on
+        macOS. If you are on Linux or Windows, say so — it may be the first report of
+        that platform rather than a bug in the schedule.

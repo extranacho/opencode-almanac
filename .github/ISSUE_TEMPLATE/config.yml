@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup and configuration
+    url: https://github.com/extranacho/opencode-almanac#readme
+    about: Install, jobs.json, and the options — all in the README.
+  - name: Scheduling semantics
+    url: https://github.com/extranacho/opencode-almanac#your-schedule
+    about: How days, the catch-up window and 29–31 clamping behave before you file.
