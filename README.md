@@ -201,6 +201,12 @@ file, and a git install cannot run a build step. Rebuild it after any change to
 
 The app reloads a local plugin's GUI when the bundle changes.
 
+## Contributing
+
+Setup, the rule about the committed bundle, and how releases are cut are in
+[CONTRIBUTING.md](CONTRIBUTING.md). Bugs go through the issue form, which asks for
+`.run/almanac/almanac.log` first — most "it never ran" reports are answered there.
+
 ## Licence
 
 MIT.
