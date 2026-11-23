@@ -15,6 +15,7 @@ interface Job {
   day: number;
   hour: number;
   minute: number;
+  timezone?: string;
   catchUpDays: number;
   paused: boolean;
   ranThisMonth: boolean;
@@ -27,17 +28,25 @@ interface Job {
 const PANEL_ID = "main";
 
 function clock(job: Job): string {
-  return `${String(job.hour).padStart(2, "0")}:${String(job.minute).padStart(2, "0")}`;
+  const time = `${String(job.hour).padStart(2, "0")}:${String(job.minute).padStart(2, "0")}`;
+  // The zone belongs with the time it applies to, not in a second place that could
+  // disagree with it.
+  return job.timezone ? `${time} ${job.timezone}` : time;
 }
 
-function when(value: string | null): string {
+/** The calendar day an instant falls on, read on a given clock. */
+function dayOf(date: Date, timeZone?: string): string {
+  return new Intl.DateTimeFormat("en-CA", { timeZone, year: "numeric", month: "2-digit", day: "2-digit" }).format(date);
+}
+
+function when(value: string | null, timeZone?: string): string {
   if (!value) return "—";
+  const zone = timeZone || undefined;
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return "—";
-  const sameDay = date.toDateString() === new Date().toDateString();
-  return sameDay
-    ? `today ${date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" })}`
-    : date.toLocaleDateString("en-GB", { day: "numeric", month: "short" });
+  const sameDay = dayOf(date, zone) === dayOf(new Date(), zone);
+  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: zone });
+  return sameDay ? `today ${time}` : `${date.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: zone })} ${time}`;
 }
 
 export default Plugin.define({
@@ -82,10 +91,11 @@ export default Plugin.define({
       if (paused === all.length) return "almanac · paused";
       const soonest = all
         .filter((job) => !job.paused && job.nextAt)
-        .map((job) => new Date(job.nextAt as string))
-        .sort((a, b) => a.getTime() - b.getTime())[0];
+        .sort((a, b) => new Date(a.nextAt as string).getTime() - new Date(b.nextAt as string).getTime())[0];
       const tail = paused ? ` · ${paused} paused` : "";
-      return soonest ? `almanac · ${when(soonest.toISOString())}${tail}` : `almanac · scheduled${tail}`;
+      return soonest
+        ? `almanac · ${when(soonest.nextAt, soonest.timezone)}${tail}`
+        : `almanac · scheduled${tail}`;
     };
 
     // Always visible, top right.
@@ -215,7 +225,7 @@ function View(props: {
                 </span>
               </div>
               <div style={{ opacity: 0.65, "margin-bottom": "4px" }}>
-                {job.paused ? "not scheduled" : `next ${when(job.nextAt)}`}
+                {job.paused ? "not scheduled" : `next ${when(job.nextAt, job.timezone)}`}
                 {job.lastSession ? ` · ${job.lastSession}` : ""}
               </div>
               <button style={button} onClick={() => void props.act(job.paused ? "resume" : "pause", job.id)}>
@@ -241,7 +251,7 @@ function View(props: {
                             style={{ cursor: "pointer", "text-decoration": "underline", opacity: 0.85, padding: "1px 0" }}
                             onClick={() => props.openSession(run.sessionID)}
                           >
-                            {when(run.at)} · {run.reason} · {run.sessionID.slice(0, 12)}…
+                            {when(run.at, job.timezone)} · {run.reason} · {run.sessionID.slice(0, 12)}…
                           </div>
                         )}
                       </For>

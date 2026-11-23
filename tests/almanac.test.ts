@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { daysInMonth, describeNext, effectiveDay, evaluate, monthKey, type Job } from "../schedule.ts";
+import { zonedTime } from "../tz.ts";
 
 const job: Job = {
   id: "batch",
@@ -9,9 +10,14 @@ const job: Job = {
   prompt: "run it",
 };
 
-/** Local-time date, because the scheduler runs on the machine clock. */
-function at(year: number, month: number, day: number, hour = 12): Date {
-  return new Date(year, month - 1, day, hour, 0, 0, 0);
+/** Local-time date, because a job without a timezone runs on the machine clock. */
+function at(year: number, month: number, day: number, hour = 12, minute = 0): Date {
+  return new Date(year, month - 1, day, hour, minute, 0, 0);
+}
+
+/** A fixed instant, for the tests that must not depend on the machine's zone. */
+function utc(year: number, month: number, day: number, hour = 12, minute = 0): Date {
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, 0, 0));
 }
 
 describe("almanac due-ness", () => {
@@ -19,6 +25,15 @@ describe("almanac due-ness", () => {
     expect(evaluate(job, at(2027, 1, 1, 7), undefined).due).toBe(false);
     expect(evaluate(job, at(2027, 1, 1, 8), undefined).due).toBe(true);
     expect(evaluate(job, at(2027, 1, 1, 23), undefined).due).toBe(true);
+  });
+
+  it("waits for the minute, not just the hour", () => {
+    const halfPast: Job = { ...job, hour: 9, minute: 30 };
+    expect(evaluate(halfPast, at(2027, 1, 1, 9, 0), undefined).due).toBe(false);
+    expect(evaluate(halfPast, at(2027, 1, 1, 9, 29), undefined).due).toBe(false);
+    expect(evaluate(halfPast, at(2027, 1, 1, 9, 30), undefined).due).toBe(true);
+    expect(evaluate(halfPast, at(2027, 1, 1, 9, 31), undefined).due).toBe(true);
+    expect(evaluate(halfPast, at(2027, 1, 1, 9, 0), undefined).reason).toBe("waiting for 09:30");
   });
 
   it("does not fire before the day arrives", () => {
@@ -66,6 +81,60 @@ describe("almanac due-ness", () => {
     // Past the window, the next run is next month.
     expect(describeNext(job, at(2027, 1, 20))).toContain("Feb");
     expect(describeNext(job, at(2027, 1, 1, 9))).toBe("due now");
+  });
+});
+
+describe("a job's timezone", () => {
+  // 08:00 in Tokyo is 23:00 UTC the day before. Nothing here may depend on where
+  // the test machine thinks it is.
+  const tokyo: Job = { ...job, hour: 8, minute: 0, timezone: "Asia/Tokyo" };
+
+  it("reads the day and hour on its own clock", () => {
+    // 22:00 UTC on 31 Dec is 07:00 on 1 Jan in Tokyo: the day has come, the hour has not.
+    expect(evaluate(tokyo, utc(2026, 12, 31, 22), undefined).reason).toBe("waiting for 08:00");
+    // 23:00 UTC on 31 Dec is 08:00 on 1 Jan in Tokyo.
+    expect(evaluate(tokyo, utc(2026, 12, 31, 23), undefined).due).toBe(true);
+    // 07:00 UTC on 1 Jan is 16:00 in Tokyo, still inside the day and the window.
+    expect(evaluate(tokyo, utc(2027, 1, 1, 7), undefined).due).toBe(true);
+  });
+
+  it("keys the month on that clock too", () => {
+    // A Tokyo job on 1 Jan claims January while the machine is still in December.
+    expect(monthKey(tokyo, utc(2026, 12, 31, 23))).toBe("batch/2027-01");
+    expect(monthKey(tokyo, utc(2026, 12, 31, 14))).toBe("batch/2026-12");
+  });
+
+  it("keeps the day boundary in the zone", () => {
+    const job15: Job = { ...job, day: 15, timezone: "Asia/Tokyo" };
+    // 14 Jan 15:30 UTC is 00:30 on the 15th in Tokyo — on its day, before its hour.
+    expect(evaluate(job15, utc(2027, 1, 14, 15, 30), undefined).reason).toBe("waiting for 08:00");
+    // 14 Jan 23:30 UTC is 15 Jan 08:30 in Tokyo: due, on the 15th.
+    expect(evaluate(job15, utc(2027, 1, 14, 23, 30), undefined).due).toBe(true);
+  });
+
+  it("names the zone when it reports the next run", () => {
+    expect(describeNext(tokyo, utc(2026, 12, 20, 0))).toContain("Asia/Tokyo");
+    // A job with no zone keeps the old, zone-free wording.
+    expect(describeNext(job, at(2026, 12, 20))).not.toContain("Asia/Tokyo");
+  });
+
+  it("follows daylight saving rather than a fixed offset", () => {
+    // Lisbon is UTC+0 in January and UTC+1 from the last Sunday in March, so 08:00
+    // there is 08:00 UTC and then 07:00 UTC. A hard-coded offset gets one of these
+    // an hour wrong.
+    expect(zonedTime(2027, 0, 15, 8, 0, "Europe/Lisbon").toISOString()).toBe("2027-01-15T08:00:00.000Z");
+    expect(zonedTime(2027, 6, 15, 8, 0, "Europe/Lisbon").toISOString()).toBe("2027-07-15T07:00:00.000Z");
+    // And with no zone it is the Date constructor's own local reading, unchanged.
+    expect(zonedTime(2027, 0, 15, 8, 0).getTime()).toBe(at(2027, 1, 15, 8).getTime());
+  });
+
+  it("resolves the two awkward hours predictably", () => {
+    // Lisbon skips 01:00-01:59 on 28 March 2027. There is no 01:30 to return, so it
+    // lands on that reading an hour later rather than inventing one.
+    expect(zonedTime(2027, 2, 28, 1, 30, "Europe/Lisbon").toISOString()).toBe("2027-03-28T01:30:00.000Z");
+    // 31 October 2027 repeats 01:00-01:59. The later of the two is used, so a job
+    // at 01:00 fires once, not twice.
+    expect(zonedTime(2027, 9, 31, 1, 0, "Europe/Lisbon").toISOString()).toBe("2027-10-31T01:00:00.000Z");
   });
 });
 
