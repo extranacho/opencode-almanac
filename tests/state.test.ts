@@ -6,8 +6,8 @@ import { addJob, formatWhen, loadJobs, nextRun, readJobFile, readPaused, removeJ
 
 const job = { id: "batch", day: 1, hour: 8, minute: 0, catchUpDays: 30, prompt: "" };
 
-function at(year: number, month: number, day: number, hour = 12): Date {
-  return new Date(year, month - 1, day, hour, 0, 0, 0);
+function at(year: number, month: number, day: number, hour = 12, minute = 0): Date {
+  return new Date(year, month - 1, day, hour, minute, 0, 0);
 }
 
 describe("next run", () => {
@@ -145,6 +145,23 @@ describe("adding and removing jobs", () => {
     const file = fresh();
     expect(addJob(file, { ...base, id: "Bad Id", prompt: "x" }).ok).toBe(false);
   });
+
+  it("keeps a valid timezone and refuses a made-up one", () => {
+    const file = fresh();
+    expect(addJob(file, { ...base, id: "lisbon", timezone: "Europe/Lisbon", prompt: "x" }).ok).toBe(true);
+    expect(readJobFile(file).jobs[0].timezone).toBe("Europe/Lisbon");
+
+    const bad = addJob(file, { ...base, id: "mars", timezone: "Mars/Olympus", prompt: "x" });
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.error).toContain("IANA");
+  });
+
+  it("leaves the timezone off when none was given, which means the local clock", () => {
+    const file = fresh();
+    expect(addJob(file, { ...base, id: "plain", prompt: "x" }).ok).toBe(true);
+    expect(readJobFile(file).jobs[0].timezone).toBeUndefined();
+    expect(loadJobs(file)[0].timezone).toBeUndefined();
+  });
 });
 
 describe("next run with a clamped day", () => {
@@ -158,5 +175,22 @@ describe("next run with a clamped day", () => {
     const job29 = { id: "end", day: 29, hour: 8, minute: 0, catchUpDays: 0, prompt: "" };
     expect(nextRun(job29, at(2027, 2, 10))).toEqual(at(2027, 2, 28, 8));
     expect(nextRun(job29, at(2028, 2, 10))).toEqual(at(2028, 2, 29, 8));
+  });
+});
+
+describe("next run in a timezone", () => {
+  const tokyo = { ...job, hour: 8, minute: 0, timezone: "Asia/Tokyo" };
+
+  it("returns the instant the job's own clock reaches the hour", () => {
+    // 09:00 on 20 Dec in Tokyo is 00:00 UTC, and 08:00 on 1 Jan in Tokyo is
+    // 23:00 UTC on 31 December.
+    expect(nextRun(tokyo, new Date(Date.UTC(2026, 11, 20, 0, 0)))?.toISOString()).toBe("2026-12-31T23:00:00.000Z");
+  });
+
+  it("keeps the minute, so a 00:30 job is not due at midnight", () => {
+    const halfPast = { ...job, day: 1, hour: 0, minute: 30, timezone: "UTC" };
+    expect(nextRun(halfPast, new Date(Date.UTC(2026, 11, 1, 0, 0)))?.toISOString()).toBe("2026-12-01T00:30:00.000Z");
+    // Once that minute has passed, the next fire is next month's.
+    expect(nextRun(halfPast, new Date(Date.UTC(2026, 11, 1, 0, 30)))?.toISOString()).toBe("2027-01-01T00:30:00.000Z");
   });
 });

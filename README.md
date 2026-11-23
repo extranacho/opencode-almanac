@@ -1,21 +1,21 @@
 # opencode-almanac
 
-An OpenCode plugin that runs an agent session on a **day and hour** — the 1st at
-08:00, say — with a catch-up window, and gives you a panel to see, pause and trigger
-it.
+An OpenCode plugin that runs an agent session on a **day and time** — the 1st at
+08:00, say, optionally in a timezone of its own — with a catch-up window, and gives
+you a panel to see, pause and trigger it.
 
 ## Why
 
 OpenCode's own `/loop` schedules by duration: `idle`, `every 5m`, `after 5m`. That
 cannot express "the first of the month". `almanac` holds a calendar instead: a day,
-an hour and a number of days it may still run late.
+a time of day and a number of days it may still run late.
 
 ## Install
 
 From git — no npm account needed:
 
 ```bash
-opencode plugin add "github:extranacho/opencode-almanac#v0.3.1"
+opencode plugin add "github:extranacho/opencode-almanac#v0.4.0"
 ```
 
 Or add it by hand to your **global** `~/.config/opencode/opencode.jsonc`, which is
@@ -25,7 +25,7 @@ what makes the desktop UI available in every window:
 {
   "plugins": [
     {
-      "package": "github:extranacho/opencode-almanac#v0.3.1",
+      "package": "github:extranacho/opencode-almanac#v0.4.0",
       "options": {
         "repo": "/absolute/path/to/your/project",
         "jobsFile": ".opencode/almanac/jobs.json"
@@ -68,12 +68,36 @@ your-project/
       "catchUpDays": 30,
       "agent": "build",
       "promptFile": "prompts/monthly.md"
+    },
+    {
+      "id": "monday-standup",
+      "label": "Monday notes for the SF team",
+      "day": 1,
+      "hour": 17,
+      "minute": 30,
+      "timezone": "America/Los_Angeles",
+      "catchUpDays": 1,
+      "prompt": "Summarise last week's platform work."
     }
   ]
 }
 ```
 
-- `day` is 1–31 and `hour` 0–23, local time.
+- `day` is 1–31, `hour` 0–23 and `minute` 0–59. The job fires at exactly
+  `hour:minute` — a job at 09:30 does not run at 09:00.
+- **Times are local to the machine unless the job names a `timezone`.** With no
+  `timezone`, the job follows whatever clock the laptop is on, so it moves if you
+  travel. With an IANA name, the day and time are read in that zone and stay put:
+
+  | Field | Fires when |
+  | --- | --- |
+  | *(omitted)* | this machine's clock reads `hour:minute` on `day` |
+  | `"timezone": "Europe/Lisbon"` | Lisbon's clock does, wherever you are |
+  | `"timezone": "Asia/Tokyo"` | Tokyo's clock does — a day ahead of Lisbon for part of every day |
+
+  Daylight saving is whatever the zone says it is; no offset is stored. A name
+  `Intl` does not recognise is refused when the job is added, because a typo
+  would otherwise schedule a job that silently never fires.
 - **29, 30 and 31 mean the last day of a shorter month.** The job still runs every
   month; only the date moves:
 
@@ -107,6 +131,11 @@ jobs from inside a session instead of hand-editing JSON. It validates rather tha
 trusting the request — a day no month is guaranteed to have, a missing `promptFile`
 or a duplicate id are all refused with a reason.
 
+The tool's own instructions tell the agent to **ask which timezone the job should
+run in** before adding it, rather than assuming the machine's local clock. Answer
+"local" and the field stays out of the file; name a zone and it is written as
+`timezone`.
+
 Ask for it in plain language:
 
 > Schedule a job called "changelog refresh" on the 15th at 09:00, using the `build`
@@ -122,6 +151,8 @@ almanac_schedule({
   label: "Changelog refresh",
   day: 15,
   hour: 9,
+  minute: 0,
+  timezone: "Europe/Lisbon",   // omit for this machine's local time
   catchUpDays: 2,
   agent: "build",
   promptFile: "prompts/changelog.md"
@@ -167,6 +198,11 @@ Clicking a session opens it as a tab in the main window.
 - **The ticker lives in the OpenCode server.** No OpenCode, no tick. That is the
   trade for having no launchd job or system cron: a job that did not fire on its
   day runs the next time OpenCode is open, within `catchUpDays`.
+- **Every time it compares is read on the job's clock** — the machine's, or the
+  job's `timezone` when it has one — including the month the claim file is named
+  after, so a job in another zone cannot claim two months for one run. Nothing
+  stores a UTC offset: `Intl` answers for the zone at that instant, which is what
+  keeps a job at 08:00 at 08:00 across a daylight-saving change.
 - **The month claim is a file** — `.run/almanac/<job>-YYYY-MM.json`, created with
   `O_EXCL`. Not in-memory and not plugin storage: `setup` can run more than once for
   a location, and only a file is atomic across those instances.

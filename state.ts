@@ -9,6 +9,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { effectiveDay, monthKey, type Job } from "./schedule.ts";
+import { isValidTimeZone, wallClock, zonedTime } from "./tz.ts";
 
 /** As written in jobs.json: a prompt inline, or a file beside it. */
 export interface JobConfig extends Job {
@@ -49,6 +50,9 @@ export function loadJobs(file: string): JobConfig[] {
       minute: 0,
       catchUpDays: 0,
       ...job,
+      // A hand-edited "" would make `Intl` throw everywhere it is used; empty means
+      // "this machine's clock", which is what no field at all means.
+      timezone: typeof job.timezone === "string" && job.timezone.trim() ? job.timezone.trim() : undefined,
       // Relative to the jobs file, so a user's prompts live beside their schedule
       // in their own repo rather than inside a package that gets replaced on update.
       prompt: job.promptFile
@@ -62,8 +66,10 @@ export function runDir(target: string): string {
 }
 
 export function claimFile(target: string, job: Job, now: Date): string {
-  const month = String(now.getMonth() + 1).padStart(2, "0");
-  return path.join(runDir(target), `${job.id}-${now.getFullYear()}-${month}.json`);
+  // The month comes from the job's own clock: a job in Tokyo claims January on the
+  // 31st of December here, and a file named after the local month would let the
+  // same job claim twice.
+  return path.join(runDir(target), `${monthKey(job, now).replace("/", "-")}.json`);
 }
 
 export function readClaim(target: string, job: Job, now: Date): Claim | null {
@@ -153,42 +159,57 @@ export function summarise(target: string, jobs: JobConfig[], now = new Date()): 
 
   const active = jobs.filter((job) => !paused[job.id]);
   let soonest = Infinity;
+  let soonestZone: string | undefined;
   for (const job of active) {
     const claim = readClaim(target, job, now);
     const next = nextRun(job, now, claim ? monthKey(job, now) : undefined);
-    if (next && next.getTime() < soonest) soonest = next.getTime();
+    if (next && next.getTime() < soonest) {
+      soonest = next.getTime();
+      soonestZone = job.timezone;
+    }
   }
   const suffix = pausedCount ? ` · ${pausedCount} paused` : "";
   if (!Number.isFinite(soonest)) return `scheduled${suffix}`;
-  return `next ${formatWhen(new Date(soonest), now)}${suffix}`;
+  return `next ${formatWhen(new Date(soonest), now, soonestZone)}${suffix}`;
 }
 
-/** The next moment this job could fire, given whether this month already ran. */
+/**
+ * The next moment this job could fire, given whether this month already ran.
+ *
+ * Month arithmetic is done on the job's clock and the result is built through
+ * `zonedTime`, so a job in another zone returns the instant that zone's clock
+ * reaches its hour — not this machine's.
+ */
 export function nextRun(job: Job, now: Date, lastRun?: string): Date | null {
-  const month = lastRun ? now.getMonth() + 1 : now.getMonth();
+  const clock = wallClock(now, job.timezone);
+  const start = lastRun ? clock.monthIndex + 1 : clock.monthIndex;
   for (let i = 0; i < 2; i++) {
-    // Clamp through effectiveDay rather than letting the Date constructor roll a
-    // 31st into the next month.
-    const first = new Date(now.getFullYear(), month + i, 1);
-    const candidate = new Date(
-      first.getFullYear(),
-      first.getMonth(),
-      effectiveDay(job.day, first.getFullYear(), first.getMonth()),
+    // Normalise by hand rather than through the Date constructor, which would roll a
+    // 31st into the next month. Clamp through effectiveDay for the same reason.
+    const offset = start + i;
+    const year = clock.year + Math.floor(offset / 12);
+    const monthIndex = ((offset % 12) + 12) % 12;
+    const candidate = zonedTime(
+      year,
+      monthIndex,
+      effectiveDay(job.day, year, monthIndex),
       job.hour ?? 0,
       job.minute ?? 0,
-      0,
-      0,
+      job.timezone,
     );
     if (candidate.getTime() > now.getTime()) return candidate;
   }
   return null;
 }
 
-export function formatWhen(date: Date, now = new Date()): string {
-  const sameDay = date.toDateString() === now.toDateString();
-  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+export function formatWhen(date: Date, now = new Date(), timeZone?: string): string {
+  const zone = timeZone || undefined;
+  const a = wallClock(date, zone);
+  const b = wallClock(now, zone);
+  const sameDay = a.year === b.year && a.monthIndex === b.monthIndex && a.day === b.day;
+  const time = date.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: zone });
   if (sameDay) return `today ${time}`;
-  return `${date.toLocaleDateString("en-GB", { day: "numeric", month: "short" })} ${time}`;
+  return `${date.toLocaleDateString("en-GB", { day: "numeric", month: "short", timeZone: zone })} ${time}`;
 }
 
 function readText(file: string): string | null {
@@ -206,6 +227,7 @@ export interface JobView {
   day: number;
   hour: number;
   minute: number;
+  timezone?: string;
   catchUpDays: number;
   paused: boolean;
   ranThisMonth: boolean;
@@ -228,6 +250,9 @@ export function describeJobs(target: string, jobs: JobConfig[], now = new Date()
       day: job.day,
       hour: job.hour ?? 0,
       minute: job.minute ?? 0,
+      // Omitted rather than null when the job runs on the local clock, so the panel
+      // has one thing to check instead of two.
+      ...(job.timezone ? { timezone: job.timezone } : {}),
       catchUpDays: job.catchUpDays ?? 0,
       paused,
       ranThisMonth: Boolean(claim),
@@ -316,6 +341,7 @@ export interface JobInput {
   day: number;
   hour: number;
   minute?: number;
+  timezone?: string;
   catchUpDays?: number;
   agent?: string;
   promptFile?: string;
@@ -350,6 +376,11 @@ export function validateJob(jobsPath: string, input: JobInput, existing: JobInpu
   }
   if (input.catchUpDays !== undefined && (!Number.isInteger(input.catchUpDays) || input.catchUpDays < 0 || input.catchUpDays > 31)) {
     return "catchUpDays must be a whole number from 0 to 31";
+  }
+  // A zone typo would otherwise produce a job that never fires, so it is refused
+  // here rather than discovered by a run that does not happen.
+  if (input.timezone !== undefined && (typeof input.timezone !== "string" || !isValidTimeZone(input.timezone))) {
+    return "timezone must be an IANA name like Europe/Lisbon or Asia/Tokyo (omit it to use this machine's local time)";
   }
   if (!input.prompt && !input.promptFile) return "give either a prompt string or a promptFile";
   if (input.promptFile) {

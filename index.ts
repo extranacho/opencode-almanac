@@ -21,6 +21,7 @@ import path from "node:path";
 import { Plugin } from "@opencode/plugin";
 import { describeNext, evaluate, monthKey } from "./schedule.ts";
 import { addJob, claimFile, consumeRunRequest, describeJobs, isPaused, loadJobs, readClaim, recordRun, removeJob, requestRun, resolveJobsFile, setPaused } from "./state.ts";
+import { hhmm } from "./tz.ts";
 import { Almanac } from "./rpc.ts";
 
 const TICK_MS = 60_000;
@@ -209,6 +210,10 @@ export default Plugin.define({
           "For 'add': day 1-31 (29-31 mean the last day of a shorter month), hour 0-23, minute 0-59,",
           "catchUpDays 0-31 (how late a missed run may still fire), optional agent name,",
           "and one of prompt (a string) or promptFile (relative to the jobs file, and it must exist).",
+          "The job fires on that day at exactly hour:minute — the minute is part of the trigger, not a rounding.",
+          "Optional timezone is an IANA name (Europe/Lisbon, Asia/Tokyo); without it the job runs on this",
+          "machine's local clock. Before adding a job, ask the user whether it should run in this machine's",
+          "local time or in a specific timezone — do not assume, and do not pass a zone the user did not ask for.",
         ].join(" "),
         input: {
           type: "object",
@@ -219,6 +224,7 @@ export default Plugin.define({
             day: { type: "number" },
             hour: { type: "number" },
             minute: { type: "number" },
+            timezone: { type: "string" },
             catchUpDays: { type: "number" },
             agent: { type: "string" },
             promptFile: { type: "string" },
@@ -236,7 +242,7 @@ export default Plugin.define({
               content: jobs
                 .map(
                   (job) =>
-                    `${job.id} — day ${job.day} at ${String(job.hour).padStart(2, "0")}:${String(job.minute ?? 0).padStart(2, "0")}, catch-up ${job.catchUpDays ?? 0}d${job.agent ? `, agent ${job.agent}` : ""}`,
+                    `${job.id} — day ${job.day} at ${hhmm(job.hour, job.minute)}${job.timezone ? ` ${job.timezone}` : " local"}, catch-up ${job.catchUpDays ?? 0}d${job.agent ? `, agent ${job.agent}` : ""}`,
                 )
                 .join("\n"),
             };
@@ -247,7 +253,7 @@ export default Plugin.define({
             if (result.ok) await rpc.events.emit("changed", {});
             return {
               content: result.ok
-                ? `Added ${request.id}. ${result.jobs} job(s) scheduled. It is live within a minute — no reload.`
+                ? `Added ${request.id}, running ${request.timezone ? `in ${request.timezone}` : "on this machine's local time"}. ${result.jobs} job(s) scheduled. It is live within a minute — no reload.`
                 : `Rejected: ${result.error}`,
             };
           }
@@ -273,7 +279,7 @@ export default Plugin.define({
           for (const job of jobs) {
             const claim = readClaim(target, job, now);
             const paused = isPaused(target, job.id);
-            lines.push(`${job.id} — day ${job.day} at ${String(job.hour).padStart(2, "0")}:${String(job.minute ?? 0).padStart(2, "0")}`);
+            lines.push(`${job.id} — day ${job.day} at ${hhmm(job.hour, job.minute)}${job.timezone ? ` ${job.timezone}` : " local"}`);
             lines.push(`  next: ${describeNext(job, now)}`);
             if (paused) lines.push("  paused: yes");
             if (claim) lines.push(`  this month: ${claim.sessionID ?? "claimed, no session"}${claim.ok ? " (ok)" : ""}`);
