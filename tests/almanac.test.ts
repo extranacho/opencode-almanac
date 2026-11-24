@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { daysInMonth, describeNext, effectiveDay, evaluate, monthKey, type Job } from "../schedule.ts";
+import { daysInMonth, describeNext, effectiveDay, evaluate, runKey, type Job } from "../schedule.ts";
 import { zonedTime } from "../tz.ts";
 
 const job: Job = {
@@ -41,16 +41,16 @@ describe("almanac due-ness", () => {
     const decision = evaluate(midMonth, at(2026, 12, 10), undefined);
     expect(decision.due).toBe(false);
     expect(decision.reason).toBe("waiting for day 15");
-    // A day-1 job read on the last day of the month is waiting for the next month,
-    // which is what a closed window looks like from here.
-    expect(evaluate(job, at(2026, 12, 31), undefined).reason).toBe("window closed after day 8");
+    // A day-1 job read on the last day of the month, long past its window, is
+    // waiting for next month's day 1.
+    expect(evaluate(job, at(2026, 12, 31), undefined).reason).toBe("waiting for day 1");
   });
 
   it("does not fire twice in the same month", () => {
     const when = at(2027, 1, 3);
-    const decision = evaluate(job, when, monthKey(job, when));
+    const decision = evaluate(job, when, runKey(job, when));
     expect(decision.due).toBe(false);
-    expect(decision.reason).toBe("already ran this month");
+    expect(decision.reason).toBe("already ran for 2027-01; next day 1");
   });
 
   it("catches up inside the window, and gives up outside it", () => {
@@ -100,8 +100,8 @@ describe("a job's timezone", () => {
 
   it("keys the month on that clock too", () => {
     // A Tokyo job on 1 Jan claims January while the machine is still in December.
-    expect(monthKey(tokyo, utc(2026, 12, 31, 23))).toBe("batch/2027-01");
-    expect(monthKey(tokyo, utc(2026, 12, 31, 14))).toBe("batch/2026-12");
+    expect(runKey(tokyo, utc(2026, 12, 31, 23))).toBe("batch/2027-01");
+    expect(runKey(tokyo, utc(2026, 12, 31, 14))).toBe("batch/2026-12");
   });
 
   it("keeps the day boundary in the zone", () => {

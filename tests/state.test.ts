@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { addJob, formatWhen, loadJobs, nextRun, readJobFile, readPaused, removeJob, resolveJobsFile, setPaused, summarise } from "../state.ts";
+import { nextFireAt as nextRun } from "../schedule.ts";
+import { addJob, formatWhen, loadJobs, readJobFile, readPaused, removeJob, resolveJobsFile, setPaused, summarise } from "../state.ts";
 
 const job = { id: "batch", day: 1, hour: 8, minute: 0, catchUpDays: 30, prompt: "" };
 
@@ -21,7 +22,7 @@ describe("next run", () => {
 
   it("rolls over when the month has already run", () => {
     // Claimed January, so the next fire is February even though today is the 1st.
-    expect(nextRun(job, at(2027, 1, 1, 9), "batch/2027-01")).toEqual(at(2027, 2, 1, 8));
+    expect(nextRun(job, at(2027, 1, 1, 9))).toEqual(at(2027, 2, 1, 8));
   });
 
   it("formats a same-day clock without the date", () => {

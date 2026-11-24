@@ -1,27 +1,42 @@
 // A calendar scheduler as an OpenCode plugin — the whole trigger, with no launchd.
 //
 // `/loop` schedules by duration (`idle`, `every 5m`, `after 5m`) and cannot express
-// "the first of the month at 08:00". A plugin can: `setup` may hold a timer, and
-// the plugin context can create a session and prompt it, which is the same pair of
-// calls `opencode-loopd` makes.
+// "the first of the month at 08:00" or "Mondays at 09:00". A plugin can: `setup`
+// may hold a timer, and the plugin context can create a session and prompt it,
+// which is the same pair of calls `opencode-loopd` makes.
 //
 // The ticker lives in the OpenCode server, so no OpenCode means no tick. That is
-// accepted: the job runs the next time OpenCode is open, not at 08:00 with the
-// laptop closed. The catch-up window is the rest of the month, and a late run is
-// safe because the job's prompt starts with `--plan`.
+// accepted: a run that was missed fires the next time OpenCode is open, as long as
+// that is inside the job's catch-up window.
 //
-// The schedule is `jobs.json` beside this file, re-read on every tick so an edit —
-// or a change made from the panel — takes effect without a reload. Claims and
-// pause state are files under `.run/almanac/` in the target repo, because `setup`
-// can run more than once for one location and anything in memory is per instance.
-// On 2026-11-19 a duplicate registration produced four dispatches in one second.
+// The schedule is the jobs file named by `options.jobsFile`, re-read on every tick
+// so an edit — or a change made from the panel — takes effect without a reload.
+// Claims and pause state are files under `.run/almanac/` in the target repo,
+// because `setup` can run more than once for one location and anything in memory
+// is per instance. On 2026-11-19 a duplicate registration produced four dispatches
+// in one second.
 
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Plugin } from "@opencode/plugin";
-import { describeNext, evaluate, monthKey } from "./schedule.ts";
-import { addJob, claimFile, consumeRunRequest, describeJobs, isPaused, loadJobs, readClaim, recordRun, removeJob, requestRun, resolveJobsFile, setPaused } from "./state.ts";
-import { hhmm } from "./tz.ts";
+import { catchUpText, describeNext, describeSchedule, evaluate, runKey, scheduleProblem } from "./schedule.ts";
+import {
+  addJob,
+  claimFile,
+  consumeRunRequest,
+  describeJobs,
+  isPaused,
+  jobsFileProblem,
+  loadJobs,
+  pruneClaims,
+  readClaim,
+  recordRun,
+  removeJob,
+  requestRun,
+  resolveJobsFile,
+  setPaused,
+  type JobConfig,
+} from "./state.ts";
 import { Almanac } from "./rpc.ts";
 
 const TICK_MS = 60_000;
@@ -85,7 +100,7 @@ export default Plugin.define({
 
       try {
         const session = await ctx.session.create({
-          title: `almanac: ${job.id} ${monthKey(job, now).split("/")[1]}`,
+          title: `almanac: ${job.id} ${runKey(job, now).split("/")[1]}`,
           location: { directory: target },
           ...(job.agent ? { agent: job.agent } : {}),
         });
@@ -94,9 +109,10 @@ export default Plugin.define({
           jobID: job.id,
           sessionID: session.id,
           at: now.toISOString(),
-          month: monthKey(job, now),
+          month: runKey(job, now),
           reason,
         });
+        pruneClaims(target, job.id);
         void rpc.events.emit("changed", {});
 
         void ctx.session
@@ -115,13 +131,34 @@ export default Plugin.define({
       }
     };
 
+    // Problems are logged when they appear and when they change, not every minute.
+    const reported = new Map<string, string>();
+    const report = (key: string, problem: string | null) => {
+      if (!problem) {
+        if (reported.has(key)) log(`${key}: fixed`);
+        reported.delete(key);
+        return;
+      }
+      if (reported.get(key) === problem) return;
+      reported.set(key, problem);
+      log(`${key}: ${problem}`);
+    };
+
     const tick = async () => {
       const now = new Date();
+      const fileProblem = jobsFileProblem(jobsPath);
+      // A missing file just means no schedule yet; a broken one is worth saying.
+      report("jobs file", fileProblem && existsSync(jobsPath) ? fileProblem : null);
       const jobs = loadJobs(jobsPath);
       if (!jobs.length) return;
 
       for (const job of jobs) {
         try {
+          // A hand-edited job is not validated on the way in, so it is here: a
+          // weekly job with no weekday would otherwise be scheduled at NaN.
+          const problem = scheduleProblem(job as unknown as Record<string, unknown>);
+          report(`${job.id} skipped`, problem);
+          if (problem) continue;
           if (isPaused(target, job.id)) continue;
 
           if (consumeRunRequest(target, job.id)) {
@@ -131,7 +168,7 @@ export default Plugin.define({
           }
 
           const existing = readClaim(target, job, now);
-          const decision = evaluate(job, now, existing ? monthKey(job, now) : undefined);
+          const decision = evaluate(job, now, existing ? runKey(job, now) : undefined);
           if (!decision.due) continue;
           log(`${job.id} ${decision.reason}`);
           await fire(job, decision.reason);
@@ -144,13 +181,21 @@ export default Plugin.define({
     const startup = () => {
       const jobs = loadJobs(jobsPath);
       if (!jobs.length) {
-        log(`no jobs in ${jobsPath}`);
+        log(jobsFileProblem(jobsPath) ?? `no jobs in ${jobsPath}`);
         return;
       }
       for (const job of jobs) {
+        if (scheduleProblem(job as unknown as Record<string, unknown>)) continue; // the first tick says why
         const paused = isPaused(target, job.id) ? " (paused)" : "";
-        log(`${job.id} next ${describeNext(job, new Date())}${paused} (target ${target})`);
+        log(`${job.id} ${describeSchedule(job)}, next ${describeNext(job, new Date())}${paused} (target ${target})`);
       }
+    };
+
+    /** One line per job, for the tool's list and the status command. */
+    const summary = (job: JobConfig) => {
+      const problem = scheduleProblem(job as unknown as Record<string, unknown>);
+      if (problem) return `${job.id} — skipped, not running: ${problem}`;
+      return `${job.id} — ${describeSchedule(job)}${job.timezone ? ` ${job.timezone}` : " local"}, catch-up ${catchUpText(job)}${job.agent ? `, agent ${job.agent}` : ""}`;
     };
     startup();
 
@@ -207,10 +252,16 @@ export default Plugin.define({
           "Add, remove or list scheduled agent runs in the almanac plugin.",
           `The schedule is ${jobsPath}.`,
           "actions: 'list', 'add', 'remove'.",
-          "For 'add': day 1-31 (29-31 mean the last day of a shorter month), hour 0-23, minute 0-59,",
-          "catchUpDays 0-31 (how late a missed run may still fire), optional agent name,",
-          "and one of prompt (a string) or promptFile (relative to the jobs file, and it must exist).",
-          "The job fires on that day at exactly hour:minute — the minute is part of the trigger, not a rounding.",
+          "For 'add', every is 'month' (the default), 'week', 'day' or 'hour', and each takes only its own fields:",
+          "month: day 1-31 (29-31 mean the last day of a shorter month), hour 0-23, minute 0-59.",
+          "week: weekday (mon, tue, wed, thu, fri, sat, sun), hour, minute.",
+          "day: hour, minute. hour: minute only (it runs every hour at that minute).",
+          "A field the frequency does not use is rejected, not ignored.",
+          "The job fires at exactly hour:minute — the minute is part of the trigger, not a rounding.",
+          "Optional catchUp is how late a missed run may still fire, written like '30m', '6h' or '2d';",
+          "'0d' (the default) means the rest of that day, and for hourly jobs the default '0h' means the rest of that hour.",
+          "It must be shorter than the gap between runs.",
+          "Also: optional agent name, and one of prompt (a string) or promptFile (relative to the jobs file, and it must exist).",
           "Optional timezone is an IANA name (Europe/Lisbon, Asia/Tokyo); without it the job runs on this",
           "machine's local clock. Before adding a job, ask the user whether it should run in this machine's",
           "local time or in a specific timezone — do not assume, and do not pass a zone the user did not ask for.",
@@ -221,10 +272,13 @@ export default Plugin.define({
             action: { type: "string", enum: ["list", "add", "remove"] },
             id: { type: "string" },
             label: { type: "string" },
+            every: { type: "string", enum: ["month", "week", "day", "hour"] },
             day: { type: "number" },
+            weekday: { type: "string" },
             hour: { type: "number" },
             minute: { type: "number" },
             timezone: { type: "string" },
+            catchUp: { type: "string" },
             catchUpDays: { type: "number" },
             agent: { type: "string" },
             promptFile: { type: "string" },
@@ -237,18 +291,12 @@ export default Plugin.define({
           const request = input as Record<string, string | number> & { action: string };
           if (request.action === "list") {
             const jobs = loadJobs(jobsPath);
-            if (!jobs.length) return { content: `No jobs scheduled in ${jobsPath}` };
-            return {
-              content: jobs
-                .map(
-                  (job) =>
-                    `${job.id} — day ${job.day} at ${hhmm(job.hour, job.minute)}${job.timezone ? ` ${job.timezone}` : " local"}, catch-up ${job.catchUpDays ?? 0}d${job.agent ? `, agent ${job.agent}` : ""}`,
-                )
-                .join("\n"),
-            };
+            if (!jobs.length) return { content: jobsFileProblem(jobsPath) ?? `No jobs scheduled in ${jobsPath}` };
+            return { content: jobs.map(summary).join("\n") };
           }
           if (request.action === "add") {
-            const result = addJob(jobsPath, request as never);
+            const { action: _action, ...job } = request;
+            const result = addJob(jobsPath, job as never);
             log(result.ok ? `job added via tool: ${request.id}` : `tool add rejected: ${result.error}`);
             if (result.ok) await rpc.events.emit("changed", {});
             return {
@@ -276,13 +324,17 @@ export default Plugin.define({
           const now = new Date();
           const jobs = loadJobs(jobsPath);
           const lines = ["almanac", "", `target: ${target}`, ""];
+          if (!jobs.length) lines.push(jobsFileProblem(jobsPath) ?? "no jobs", "");
           for (const job of jobs) {
+            lines.push(summary(job));
+            if (scheduleProblem(job as unknown as Record<string, unknown>)) {
+              lines.push("");
+              continue;
+            }
             const claim = readClaim(target, job, now);
-            const paused = isPaused(target, job.id);
-            lines.push(`${job.id} — day ${job.day} at ${hhmm(job.hour, job.minute)}${job.timezone ? ` ${job.timezone}` : " local"}`);
             lines.push(`  next: ${describeNext(job, now)}`);
-            if (paused) lines.push("  paused: yes");
-            if (claim) lines.push(`  this month: ${claim.sessionID ?? "claimed, no session"}${claim.ok ? " (ok)" : ""}`);
+            if (isPaused(target, job.id)) lines.push("  paused: yes");
+            if (claim) lines.push(`  latest run: ${claim.sessionID ?? "claimed, no session"}${claim.ok ? " (ok)" : ""}`);
             lines.push("");
           }
           await ctx.session.prompt({ sessionID, text: lines.join("\n"), delivery });

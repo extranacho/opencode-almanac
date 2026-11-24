@@ -12,13 +12,16 @@ const JobState = {
   properties: {
     id: { type: "string" },
     label: { type: "string" },
+    every: { type: "string", enum: ["month", "week", "day", "hour"] },
+    schedule: { type: "string" },
     day: { type: "number" },
+    weekday: { type: "string" },
     hour: { type: "number" },
     minute: { type: "number" },
     timezone: { type: "string" },
-    catchUpDays: { type: "number" },
+    catchUp: { type: "string" },
     paused: { type: "boolean" },
-    ranThisMonth: { type: "boolean" },
+    ranLatest: { type: "boolean" },
     nextAt: { type: ["string", "null"] },
     lastRun: { type: ["string", "null"] },
     lastSession: { type: ["string", "null"] },
@@ -36,7 +39,7 @@ const JobState = {
       },
     },
   },
-  required: ["id", "label", "day", "hour", "minute", "paused", "ranThisMonth", "sessions"],
+  required: ["id", "label", "every", "schedule", "minute", "catchUp", "paused", "ranLatest", "sessions"],
   additionalProperties: false,
 } as const;
 
@@ -72,16 +75,21 @@ export const Almanac = Rpc.define({
         properties: {
           id: { type: "string" },
           label: { type: "string" },
+          every: { type: "string", enum: ["month", "week", "day", "hour"] },
           day: { type: "number" },
+          weekday: { type: "string" },
           hour: { type: "number" },
           minute: { type: "number" },
           timezone: { type: "string" },
+          catchUp: { type: "string" },
           catchUpDays: { type: "number" },
           agent: { type: "string" },
           promptFile: { type: "string" },
           prompt: { type: "string" },
         },
-        required: ["id", "day", "hour"],
+        // Which schedule fields are needed depends on `every`, so the server checks
+        // them and answers with a reason rather than a schema error.
+        required: ["id"],
         additionalProperties: false,
       },
       output: {
