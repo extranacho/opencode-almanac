@@ -38,16 +38,27 @@ waste an afternoon.
 
 ## Versions
 
-`package.json`, the latest git tag and the install lines in `README.md` must agree.
-Bump the package version and tag together in the same release commit, then push the
-tag:
+`package.json`, `package-lock.json`, the latest git tag and the install lines in
+`README.md` must agree. One release commit bumps all of them.
+
+`main` is protected and only takes pull requests, so the release commit goes through
+one. Tag it **after** it is on `main`:
 
 ```bash
+git switch -c release-x.y.z
 npm pkg set version=x.y.z
-git commit -am "…"
+npm install --package-lock-only --ignore-scripts
+# update the two install lines in README.md to #vx.y.z
+git commit -am "almanac x.y.z: …"
+git push -u origin release-x.y.z
+gh pr create --fill && gh pr merge --squash --delete-branch
+git switch main && git pull --ff-only
 git tag -a vx.y.z -m "…"
-git push origin main vx.y.z
+git push origin vx.y.z
 ```
+
+Tagging before the merge leaves the tag on a commit `main` does not contain, which
+is how 0.5.0 ended up needing a merge commit.
 
 They had drifted once (package `0.1.0`, tag `v0.3.0`), which is why this section
 exists.
