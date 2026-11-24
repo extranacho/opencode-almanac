@@ -12,13 +12,17 @@ import { Almanac } from "./rpc";
 interface Job {
   id: string;
   label: string;
-  day: number;
-  hour: number;
+  every: "month" | "week" | "day" | "hour";
+  /** "Mondays at 09:00", built by the server so the panel and the log agree. */
+  schedule: string;
+  day?: number;
+  weekday?: string;
+  hour?: number;
   minute: number;
   timezone?: string;
-  catchUpDays: number;
+  catchUp: string;
   paused: boolean;
-  ranThisMonth: boolean;
+  ranLatest: boolean;
   nextAt: string | null;
   lastRun: string | null;
   lastSession: string | null;
@@ -27,11 +31,10 @@ interface Job {
 
 const PANEL_ID = "main";
 
-function clock(job: Job): string {
-  const time = `${String(job.hour).padStart(2, "0")}:${String(job.minute).padStart(2, "0")}`;
+function schedule(job: Job): string {
   // The zone belongs with the time it applies to, not in a second place that could
   // disagree with it.
-  return job.timezone ? `${time} ${job.timezone}` : time;
+  return job.timezone ? `${job.schedule} ${job.timezone}` : job.schedule;
 }
 
 /** The calendar day an instant falls on, read on a given clock. */
@@ -219,14 +222,12 @@ function View(props: {
               <div style={{ display: "flex", "align-items": "baseline", gap: "6px" }}>
                 <strong>{job.label}</strong>
                 <span style={{ opacity: 0.65 }}>
-                  day {job.day}
-                  {job.day > 28 ? " or last" : ""} at {clock(job)} ·{" "}
-                  {job.paused ? "paused" : job.ranThisMonth ? "ran this month" : "scheduled"}
+                  {schedule(job)} · {job.paused ? "paused" : "scheduled"}
                 </span>
               </div>
               <div style={{ opacity: 0.65, "margin-bottom": "4px" }}>
                 {job.paused ? "not scheduled" : `next ${when(job.nextAt, job.timezone)}`}
-                {job.lastSession ? ` · ${job.lastSession}` : ""}
+                {job.lastRun ? ` · last ran ${when(job.lastRun, job.timezone)}` : " · not run yet"}
               </div>
               <button style={button} onClick={() => void props.act(job.paused ? "resume" : "pause", job.id)}>
                 {job.paused ? "Resume" : "Pause"}

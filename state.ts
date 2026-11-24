@@ -3,13 +3,22 @@
 // The TUI does not talk to the server part over RPC on purpose: the files are
 // already the shared truth (a claim has to be a file to work across instances),
 // and reading them directly means the panel can never disagree with what the
-// ticker is about to do. The cost is a poll interval, which for a monthly
-// scheduler is not a cost at all.
+// ticker is about to do.
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { effectiveDay, monthKey, type Job } from "./schedule.ts";
-import { isValidTimeZone, wallClock, zonedTime } from "./tz.ts";
+import {
+  catchUpText,
+  describeSchedule,
+  everyOf,
+  nextFireAt,
+  runKey,
+  scheduleProblem,
+  weekdayIndex,
+  type Every,
+  type Job,
+} from "./schedule.ts";
+import { wallClock } from "./tz.ts";
 
 /** As written in jobs.json: a prompt inline, or a file beside it. */
 export interface JobConfig extends Job {
@@ -35,6 +44,23 @@ export function resolveJobsFile(pluginDir: string, repo: string, jobsFile?: stri
   return path.isAbsolute(jobsFile) ? jobsFile : path.join(repo, jobsFile);
 }
 
+/**
+ * Why the jobs file cannot be used, or null when it reads.
+ *
+ * A file that does not parse loads as no jobs, which looks exactly like an empty
+ * schedule. This is what lets the log say which one it is.
+ */
+export function jobsFileProblem(file: string): string | null {
+  if (!existsSync(file)) return `no jobs file at ${file}`;
+  try {
+    const parsed = JSON.parse(readFileSync(file, "utf8"));
+    if (!Array.isArray(parsed?.jobs)) return `${file} has no "jobs" array`;
+    return null;
+  } catch (error) {
+    return `${file} is not valid JSON (${(error as Error).message}); no job will run until it is fixed`;
+  }
+}
+
 export function loadJobs(file: string): JobConfig[] {
   if (!existsSync(file)) return [];
   let parsed;
@@ -48,7 +74,6 @@ export function loadJobs(file: string): JobConfig[] {
     .filter((job) => job && typeof job.id === "string")
     .map((job) => ({
       minute: 0,
-      catchUpDays: 0,
       ...job,
       // A hand-edited "" would make `Intl` throw everywhere it is used; empty means
       // "this machine's clock", which is what no field at all means.
@@ -65,11 +90,17 @@ export function runDir(target: string): string {
   return path.join(target, ".run", "almanac");
 }
 
+/**
+ * The claim for the latest scheduled time: `<id>-2027-01.json` for a monthly job,
+ * `<id>-2027-01-15.json` for a daily or weekly one, `<id>-2027-01-15T09.json` for
+ * an hourly one.
+ *
+ * The key comes from the job's own clock: a job in Tokyo claims January on the 31st
+ * of December here, and a file named after the local month would let the same job
+ * claim twice.
+ */
 export function claimFile(target: string, job: Job, now: Date): string {
-  // The month comes from the job's own clock: a job in Tokyo claims January on the
-  // 31st of December here, and a file named after the local month would let the
-  // same job claim twice.
-  return path.join(runDir(target), `${monthKey(job, now).replace("/", "-")}.json`);
+  return path.join(runDir(target), `${runKey(job, now).replace("/", "-")}.json`);
 }
 
 export function readClaim(target: string, job: Job, now: Date): Claim | null {
@@ -82,20 +113,34 @@ export function readClaim(target: string, job: Job, now: Date): Claim | null {
   }
 }
 
-/** Every claim on disk, newest month first. Used by the panel's history line. */
-export function allClaims(target: string): Array<{ id: string; month: string; claim: Claim }> {
+/** How many claim files each job keeps. Only the latest is ever read. */
+export const CLAIMS_KEPT = 10;
+
+/**
+ * Delete a job's old claims, keeping the newest few.
+ *
+ * Only the claim for the latest scheduled time decides anything; older ones are
+ * history, and `history.jsonl` already has that. An hourly job would otherwise
+ * leave close to nine thousand files a year.
+ */
+export function pruneClaims(target: string, jobID: string, keep = CLAIMS_KEPT): number {
   const dir = runDir(target);
-  if (!existsSync(dir)) return [];
-  const out = [];
-  for (const name of readdirSync(dir)) {
-    if (!name.endsWith(".json") || name === "paused.json") continue;
-    const match = name.match(/^(.+)-(\d{4}-\d{2})\.json$/);
-    if (!match) continue;
+  if (!existsSync(dir)) return 0;
+  const escaped = jobID.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // Anchored on the key's shape, so pruning "report" never touches "report-2".
+  const pattern = new RegExp(`^${escaped}-(\\d{4}-\\d{2}(?:-\\d{2}(?:T\\d{2})?)?)\\.json$`);
+  const claims = readdirSync(dir)
+    .map((name) => ({ name, key: pattern.exec(name)?.[1] }))
+    .filter((entry): entry is { name: string; key: string } => Boolean(entry.key))
+    .sort((a, b) => b.key.localeCompare(a.key));
+  let removed = 0;
+  for (const { name } of claims.slice(keep)) {
     try {
-      out.push({ id: match[1], month: match[2], claim: JSON.parse(readFileSync(path.join(dir, name), "utf8")) });
+      unlinkSync(path.join(dir, name));
+      removed++;
     } catch {}
   }
-  return out.sort((a, b) => b.month.localeCompare(a.month));
+  return removed;
 }
 
 type PausedMap = Record<string, { pausedAt: string }>;
@@ -161,9 +206,8 @@ export function summarise(target: string, jobs: JobConfig[], now = new Date()): 
   let soonest = Infinity;
   let soonestZone: string | undefined;
   for (const job of active) {
-    const claim = readClaim(target, job, now);
-    const next = nextRun(job, now, claim ? monthKey(job, now) : undefined);
-    if (next && next.getTime() < soonest) {
+    const next = nextFireAt(job, now);
+    if (next.getTime() < soonest) {
       soonest = next.getTime();
       soonestZone = job.timezone;
     }
@@ -171,35 +215,6 @@ export function summarise(target: string, jobs: JobConfig[], now = new Date()): 
   const suffix = pausedCount ? ` · ${pausedCount} paused` : "";
   if (!Number.isFinite(soonest)) return `scheduled${suffix}`;
   return `next ${formatWhen(new Date(soonest), now, soonestZone)}${suffix}`;
-}
-
-/**
- * The next moment this job could fire, given whether this month already ran.
- *
- * Month arithmetic is done on the job's clock and the result is built through
- * `zonedTime`, so a job in another zone returns the instant that zone's clock
- * reaches its hour — not this machine's.
- */
-export function nextRun(job: Job, now: Date, lastRun?: string): Date | null {
-  const clock = wallClock(now, job.timezone);
-  const start = lastRun ? clock.monthIndex + 1 : clock.monthIndex;
-  for (let i = 0; i < 2; i++) {
-    // Normalise by hand rather than through the Date constructor, which would roll a
-    // 31st into the next month. Clamp through effectiveDay for the same reason.
-    const offset = start + i;
-    const year = clock.year + Math.floor(offset / 12);
-    const monthIndex = ((offset % 12) + 12) % 12;
-    const candidate = zonedTime(
-      year,
-      monthIndex,
-      effectiveDay(job.day, year, monthIndex),
-      job.hour ?? 0,
-      job.minute ?? 0,
-      job.timezone,
-    );
-    if (candidate.getTime() > now.getTime()) return candidate;
-  }
-  return null;
 }
 
 export function formatWhen(date: Date, now = new Date(), timeZone?: string): string {
@@ -224,13 +239,19 @@ function readText(file: string): string | null {
 export interface JobView {
   id: string;
   label: string;
-  day: number;
-  hour: number;
+  every: Every;
+  /** "Mondays at 09:00", without the zone. */
+  schedule: string;
+  day?: number;
+  weekday?: string;
+  hour?: number;
   minute: number;
   timezone?: string;
-  catchUpDays: number;
+  /** As it would be written: "0d", "6h", "30m". */
+  catchUp: string;
   paused: boolean;
-  ranThisMonth: boolean;
+  /** Whether the latest scheduled time has run. */
+  ranLatest: boolean;
   nextAt: string | null;
   lastRun: string | null;
   lastSession: string | null;
@@ -243,23 +264,31 @@ export function describeJobs(target: string, jobs: JobConfig[], now = new Date()
   return jobs.map((job) => {
     const paused = isPaused(target, job.id);
     const claim = readClaim(target, job, now);
-    const next = paused ? null : nextRun(job, now, claim ? monthKey(job, now) : undefined);
+    const next = paused ? null : nextFireAt(job, now);
+    const sessions = sessionsFor(job, claim, history);
+    const every = everyOf(job);
     return {
       id: job.id,
       label: job.label ?? job.id,
-      day: job.day,
-      hour: job.hour ?? 0,
+      every,
+      schedule: describeSchedule(job),
+      // Each frequency sends only the fields it uses, the same rule the file has.
+      ...(every === "month" ? { day: job.day } : {}),
+      ...(every === "week" ? { weekday: job.weekday } : {}),
+      ...(every !== "hour" ? { hour: job.hour ?? 0 } : {}),
       minute: job.minute ?? 0,
       // Omitted rather than null when the job runs on the local clock, so the panel
       // has one thing to check instead of two.
       ...(job.timezone ? { timezone: job.timezone } : {}),
-      catchUpDays: job.catchUpDays ?? 0,
+      catchUp: catchUpText(job),
       paused,
-      ranThisMonth: Boolean(claim),
+      ranLatest: Boolean(claim),
       nextAt: next ? next.toISOString() : null,
-      lastRun: claim?.startedAt ?? null,
-      lastSession: claim?.sessionID ?? null,
-      sessions: sessionsFor(job, claim, history),
+      // The newest run of any scheduled time, not only the latest one's claim: a
+      // daily job that missed today still ran yesterday.
+      lastRun: sessions[0]?.at ?? claim?.startedAt ?? null,
+      lastSession: sessions[0]?.sessionID ?? claim?.sessionID ?? null,
+      sessions,
     };
   });
 }
@@ -277,16 +306,30 @@ export function historyFile(target: string): string {
   return path.join(runDir(target), "history.jsonl");
 }
 
+/** Past this many lines the history is cut back to the newest HISTORY_KEPT. */
+export const HISTORY_LIMIT = 2000;
+export const HISTORY_KEPT = 1000;
+
 /**
  * Append-only, one line per dispatch.
  *
- * Claims are per month and get overwritten by a forced run, so they cannot answer
+ * Claims are pruned and get overwritten by a forced run, so they cannot answer
  * "what has this job run". This can, and it survives restarts without a schema.
+ * It is trimmed rather than left to grow: an hourly job adds 8,760 lines a year,
+ * and the panel only ever shows the newest 25 per job.
  */
 export function recordRun(target: string, record: RunRecord): void {
   try {
     mkdirSync(runDir(target), { recursive: true });
-    appendFileSync(historyFile(target), `${JSON.stringify(record)}\n`);
+    const file = historyFile(target);
+    appendFileSync(file, `${JSON.stringify(record)}\n`);
+    const lines = readFileSync(file, "utf8").split("\n").filter((line) => line.trim());
+    if (lines.length > HISTORY_LIMIT) {
+      // Same temp-and-rename as the jobs file, so a crash cannot truncate it.
+      const temp = `${file}.tmp`;
+      writeFileSync(temp, `${lines.slice(-HISTORY_KEPT).join("\n")}\n`);
+      renameSync(temp, file);
+    }
   } catch {}
 }
 
@@ -338,10 +381,13 @@ export interface JobFile {
 export interface JobInput {
   id: string;
   label?: string;
-  day: number;
-  hour: number;
+  every?: Every;
+  day?: number;
+  weekday?: string;
+  hour?: number;
   minute?: number;
   timezone?: string;
+  catchUp?: string;
   catchUpDays?: number;
   agent?: string;
   promptFile?: string;
@@ -357,31 +403,17 @@ export function readJobFile(jobsPath: string): JobFile {
 /**
  * Why a job would be rejected, or null when it is fine.
  *
- * `day` stops at 28 because no month is guaranteed to have a 29th; a job on the
- * 31st would fire in some months and silently skip others, which is worse than
- * refusing it. A prompt that does not exist is rejected for the same reason: it
- * would dispatch an empty message once a month and look like it worked.
+ * The schedule fields are checked by `scheduleProblem`, which the ticker also runs
+ * on hand-edited jobs. A prompt that does not exist is rejected here: it would
+ * dispatch an empty message on schedule and look like it worked.
  */
 export function validateJob(jobsPath: string, input: JobInput, existing: JobInput[] = []): string | null {
   if (!/^[a-z0-9][a-z0-9-]{0,40}$/.test(String(input.id ?? ""))) {
     return "id must be lower-case letters, digits and dashes, starting with a letter or digit";
   }
   if (existing.some((job) => job.id === input.id)) return `a job with id "${input.id}" already exists`;
-  if (!Number.isInteger(input.day) || input.day < 1 || input.day > 31) {
-    return "day must be a whole number from 1 to 31 (29-31 clamp to the last day of a shorter month)";
-  }
-  if (!Number.isInteger(input.hour) || input.hour < 0 || input.hour > 23) return "hour must be 0 to 23";
-  if (input.minute !== undefined && (!Number.isInteger(input.minute) || input.minute < 0 || input.minute > 59)) {
-    return "minute must be 0 to 59";
-  }
-  if (input.catchUpDays !== undefined && (!Number.isInteger(input.catchUpDays) || input.catchUpDays < 0 || input.catchUpDays > 31)) {
-    return "catchUpDays must be a whole number from 0 to 31";
-  }
-  // A zone typo would otherwise produce a job that never fires, so it is refused
-  // here rather than discovered by a run that does not happen.
-  if (input.timezone !== undefined && (typeof input.timezone !== "string" || !isValidTimeZone(input.timezone))) {
-    return "timezone must be an IANA name like Europe/Lisbon or Asia/Tokyo (omit it to use this machine's local time)";
-  }
+  const problem = scheduleProblem(input as unknown as Record<string, unknown>);
+  if (problem) return problem;
   if (!input.prompt && !input.promptFile) return "give either a prompt string or a promptFile";
   if (input.promptFile) {
     const file = path.isAbsolute(input.promptFile) ? input.promptFile : path.join(path.dirname(jobsPath), input.promptFile);
@@ -401,9 +433,17 @@ function writeJobFile(jobsPath: string, file: JobFile): void {
 
 export function addJob(jobsPath: string, input: JobInput): { ok: true; jobs: number } | { ok: false; error: string } {
   const file = readJobFile(jobsPath);
-  const problem = validateJob(jobsPath, input, file.jobs);
+  // Tools and RPC callers send every property they have, often as undefined or "".
+  // Drop those first, so "not given" is one thing and the file only holds fields
+  // the job uses.
+  const clean = Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined && value !== null && value !== ""),
+  ) as unknown as JobInput;
+  const problem = validateJob(jobsPath, clean, file.jobs);
   if (problem) return { ok: false, error: problem };
-  file.jobs.push(input);
+  // One spelling in the file, whatever the request said: "Monday" becomes "mon".
+  if (clean.weekday !== undefined) clean.weekday = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"][weekdayIndex(clean.weekday)];
+  file.jobs.push(clean);
   writeJobFile(jobsPath, file);
   return { ok: true, jobs: file.jobs.length };
 }

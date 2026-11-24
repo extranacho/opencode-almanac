@@ -1,25 +1,22 @@
 # opencode-almanac
 
-An OpenCode plugin that runs an agent session on a **day and time** — the 1st at
-08:00, say, optionally in a timezone of its own — with a catch-up window, and gives
-you a panel to see, pause and trigger it.
+An OpenCode plugin that runs an agent session on a calendar schedule: monthly,
+weekly, daily or hourly, at a set time, optionally in a timezone of its own. A run
+missed while OpenCode was closed still fires when it opens, within a window you
+choose. A desktop panel shows what is scheduled and lets you pause or trigger it.
 
-## Why
-
-OpenCode's own `/loop` schedules by duration: `idle`, `every 5m`, `after 5m`. That
-cannot express "the first of the month". `almanac` holds a calendar instead: a day,
-a time of day and a number of days it may still run late.
+OpenCode's own `/loop` schedules by duration (`every 5m`, `after 5m`), which cannot
+say "the 1st at 08:00" or "Mondays at 09:00". This can.
 
 ## Install
-
-From git — no npm account needed:
 
 ```bash
 opencode plugin add "github:extranacho/opencode-almanac#v0.4.0"
 ```
 
-Or add it by hand to your **global** `~/.config/opencode/opencode.jsonc`, which is
-what makes the desktop UI available in every window:
+Then point it at your project and schedule in your **global**
+`~/.config/opencode/opencode.jsonc`, which is what makes the panel appear in every
+window:
 
 ```jsonc
 {
@@ -37,211 +34,143 @@ what makes the desktop UI available in every window:
 
 | Option | Meaning |
 | --- | --- |
-| `repo` | The project the jobs act on. Defaults to wherever OpenCode is running. |
-| `jobsFile` | Your schedule, **relative to `repo`**. Defaults to `jobs.json` beside the plugin. |
+| `repo` | The project the jobs run in. Defaults to wherever OpenCode is running. |
+| `jobsFile` | Your schedule, relative to `repo`. **Set it**: without it the plugin reads the empty schedule it ships with, and nothing runs. |
 
-The plugin ships an **empty** schedule. Bring your own.
-
-## Your schedule
-
-Keep it in the repo it acts on, so it is versioned with the work:
+The plugin keeps its state in `.run/` inside `repo`. Add it to that repo's
+`.gitignore`:
 
 ```text
-your-project/
-└── .opencode/
-    └── almanac/
-        ├── jobs.json
-        └── prompts/
-            └── monthly.md
+.run/
 ```
+
+## A first job
 
 ```json
 {
   "version": 1,
   "jobs": [
     {
-      "id": "monthly-report",
-      "label": "Monthly report",
-      "day": 1,
-      "hour": 8,
-      "minute": 0,
-      "catchUpDays": 30,
-      "agent": "build",
-      "promptFile": "prompts/monthly.md"
-    },
-    {
-      "id": "monday-standup",
-      "label": "Monday notes for the SF team",
-      "day": 1,
-      "hour": 17,
-      "minute": 30,
-      "timezone": "America/Los_Angeles",
-      "catchUpDays": 1,
-      "prompt": "Summarise last week's platform work."
+      "id": "standup-notes",
+      "every": "week",
+      "weekday": "mon",
+      "hour": 9,
+      "prompt": "Summarise last week's merged PRs into NOTES.md."
     }
   ]
 }
 ```
 
-- `day` is 1–31, `hour` 0–23 and `minute` 0–59. The job fires at exactly
-  `hour:minute` — a job at 09:30 does not run at 09:00.
-- **Times are local to the machine unless the job names a `timezone`.** With no
-  `timezone`, the job follows whatever clock the laptop is on, so it moves if you
-  travel. With an IANA name, the day and time are read in that zone and stay put:
+Save that as `.opencode/almanac/jobs.json` in your project. The file is re-read
+every minute, so a change is live within a minute, with no reload. Or skip the JSON
+and [ask an agent](#letting-an-agent-schedule-work). `jobs.example.json` has one job
+of each frequency.
 
-  | Field | Fires when |
-  | --- | --- |
-  | *(omitted)* | this machine's clock reads `hour:minute` on `day` |
-  | `"timezone": "Europe/Lisbon"` | Lisbon's clock does, wherever you are |
-  | `"timezone": "Asia/Tokyo"` | Tokyo's clock does — a day ahead of Lisbon for part of every day |
+## Fields
 
-  Daylight saving is whatever the zone says it is; no offset is stored. A name
-  `Intl` does not recognise is refused when the job is added, because a typo
-  would otherwise schedule a job that silently never fires.
-- **29, 30 and 31 mean the last day of a shorter month.** The job still runs every
-  month; only the date moves:
+| Field | Used by | Meaning |
+| --- | --- | --- |
+| `id` | all | Lower-case letters, digits and dashes. Names the job's files. |
+| `every` | all | `"month"` (the default), `"week"`, `"day"` or `"hour"`. |
+| `day` | month | 1–31. 29–31 mean the last day of a shorter month: `31` runs on 30 April and 28 February. |
+| `weekday` | week | `mon` … `sun`. Full names work too. |
+| `hour` | month, week, day | 0–23. |
+| `minute` | all | 0–59, default 0. A job at 09:30 does not run at 09:00. An hourly job runs at this minute past every hour. |
+| `timezone` | all | An IANA name such as `Europe/Lisbon`. Without it the job follows this machine's clock, so it moves when you travel. |
+| `catchUp` | all | How late a missed run may still start: `"30m"`, `"6h"`, `"2d"`. See below. |
+| `prompt` or `promptFile` | all | The message the session gets. `promptFile` is relative to `jobs.json`. |
+| `agent` | all | Optional. The agent the session runs as. |
+| `label` | all | Optional. The name shown in the panel. |
 
-  | Month | `day: 31` fires on | `day: 30` fires on |
-  | --- | --- | --- |
-  | 31 days | the 31st | the 30th |
-  | 30 days | the 30th | the 30th |
-  | 28 days (February) | the 28th | the 28th |
-  | 29 days (leap February) | the 29th | the 29th |
+A field the frequency does not use is refused rather than ignored, so a weekly job
+with `day: 15` is an error, not a job that quietly runs on Mondays. A job written
+by hand that breaks a rule is skipped, and the log says why.
 
-  Days 1–28 are never moved. Nothing is skipped and nothing rolls into the next
-  month — a naive `new Date(y, 1, 31)` becomes 3 March, which is why the date is
-  clamped before it is built.
-- A clamped run still counts as that month's run, and the log says so:
-  `waiting for day 28 (day 31 clamped to 28)`.
-- Two jobs can land on the same date: `day: 28` and `day: 31` both fire on
-  28 February. Jobs are independent, each with its own monthly claim.
-- `catchUpDays` is how many days late a missed run may still fire. `0` means
-  strictly that day.
-- `promptFile` is relative to `jobs.json`; a `prompt` string works too.
-- `agent` is optional — it names the agent the session runs as.
-- `jobs.example.json` shows the same shape.
+### Catching up
 
-The file is re-read on every tick, so an edit is live within a minute — no reload,
-no restart. Changes appear in the panel on its next refresh.
+The schedule only ticks while OpenCode is open. If the laptop is shut at 09:00, the
+run fires the next time OpenCode is open, provided that is inside `catchUp`. After
+that, the run is skipped. It is never backfilled.
+
+- `"0d"`, the default, means the rest of that day. For hourly jobs the default is
+  `"0h"`, the rest of that hour.
+- Days and hours count to the end of that day or hour, so a daily 23:00 job with
+  `"3h"` can still start at 02:59. Minutes are exact.
+- The window must be shorter than the gap between runs: under an hour for hourly
+  jobs, under a day for daily ones, up to `"6d"` weekly and `"31d"` monthly.
+- A late run can cross into the next day or month. It still counts as the run it
+  was late for, so the next scheduled run fires as normal.
+- A job added inside its window runs right away. An hourly job at `:00` added at
+  10:40 runs at 10:40, then at 11:00.
+
+Each run is a new OpenCode session, so an hourly job makes 24 a day.
 
 ## Letting an agent schedule work
 
-The plugin registers a tool, `almanac_schedule`, so an agent can add, remove or list
-jobs from inside a session instead of hand-editing JSON. It validates rather than
-trusting the request — a day no month is guaranteed to have, a missing `promptFile`
-or a duplicate id are all refused with a reason.
+The plugin gives agents a tool, `almanac_schedule`, to add, remove and list jobs.
+It applies the same rules as the file and refuses a bad request with the reason. It
+also tells the agent to ask you which timezone to use rather than assume one.
 
-The tool's own instructions tell the agent to **ask which timezone the job should
-run in** before adding it, rather than assuming the machine's local clock. Answer
-"local" and the field stays out of the file; name a zone and it is written as
-`timezone`.
+> Every Friday at 17:30, have the `build` agent update CHANGELOG.md since the last
+> tag. Put the prompt in its own file.
 
-Ask for it in plain language:
+## The panel
 
-> Schedule a job called "changelog refresh" on the 15th at 09:00, using the `build`
-> agent, that updates CHANGELOG.md since the last tag. Put the prompt in its own
-> file.
+A **titlebar pill** shows the next run, or `paused`. Click it, or run `/almanac`,
+for the panel. It is also in the side region's **New tab** list. Each job shows its
+schedule, next run and last run, with **Pause/Resume**, **Run now** and its past
+sessions. Clicking a session opens it.
 
-The agent then calls:
+**Run now** is picked up within a minute. It is an extra run and does not use up
+the next scheduled one.
 
-```jsonc
-almanac_schedule({
-  action: "add",
-  id: "changelog-refresh",
-  label: "Changelog refresh",
-  day: 15,
-  hour: 9,
-  minute: 0,
-  timezone: "Europe/Lisbon",   // omit for this machine's local time
-  catchUpDays: 2,
-  agent: "build",
-  promptFile: "prompts/changelog.md"
-})
-```
+`/almanac-status` prints the same information into the current session.
 
-`action: "list"` returns the current schedule, `action: "remove"` with an `id` drops
-one. Writes are atomic (temp file plus rename), so a crash mid-write cannot leave a
-schedule that fails to parse — which would read as "no jobs" and silently stop the
-ticker.
+## When a job did not run
+
+Read `.run/almanac.log` in your project. It records startup, each dispatch, each
+skipped job and why, and a jobs file that is not valid JSON. A broken file stops
+every job until it is fixed, and that log is the only place that says so.
+
+## How it works
+
+- **The timer runs inside the OpenCode server**, once a minute. There is no
+  launchd job and no system cron, which is why nothing runs while OpenCode is closed.
+- **Every scheduled time is claimed once.** The claim is a file in `.run/almanac/`,
+  created with `O_EXCL`, because the plugin's `setup` can run more than once for a
+  location and only a file is atomic across those instances. Each job keeps its
+  last 10 claims.
+- **Times are read on the job's clock**, either the machine's or its `timezone`.
+  No UTC offset is stored: `Intl` answers for the zone at each moment, so 08:00
+  stays 08:00 across a daylight-saving change.
+- **Runs are logged** to `.run/almanac/history.jsonl`, which the panel reads. It
+  is trimmed to the newest 1,000 runs once it passes 2,000.
+- **Pause** is `.run/almanac/paused.json`, and **Run now** is a marker file the
+  timer picks up on its next tick. One place dispatches, so one place claims.
 
 ## RPC
 
-The same operations are available over HTTP for anything outside OpenCode:
-
-| Method | Input | Does |
-| --- | --- | --- |
-| `list` | — | every job with its state and run history |
-| `pause` / `resume` | `{ id }` | one job |
-| `runNow` | `{ id }` | queues a dispatch, picked up within a minute |
-| `addJob` | `{ id, day, hour, ... }` | validated add |
-| `removeJob` | `{ id }` | removes one |
+The same operations are available over HTTP:
 
 ```bash
 opencode api post /api/rpc/almanac/list --data '{"input":{}}'
 ```
 
-There is also a `changed` event, emitted whenever the schedule or a run changes.
-
-## The UI
-
-A **titlebar pill** shows the next run, or `paused`. Clicking it opens the panel,
-which also appears in the side region's **New tab** list.
-
-Each job row shows its schedule, state, when it last ran and under which session,
-with **Pause/Resume** and **Run now**, and a collapsible **Sessions (n)** list.
-Clicking a session opens it as a tab in the main window.
-
-`/almanac` (and the command palette) toggles the panel.
-
-## How it works
-
-- **The ticker lives in the OpenCode server.** No OpenCode, no tick. That is the
-  trade for having no launchd job or system cron: a job that did not fire on its
-  day runs the next time OpenCode is open, within `catchUpDays`.
-- **Every time it compares is read on the job's clock** — the machine's, or the
-  job's `timezone` when it has one — including the month the claim file is named
-  after, so a job in another zone cannot claim two months for one run. Nothing
-  stores a UTC offset: `Intl` answers for the zone at that instant, which is what
-  keeps a job at 08:00 at 08:00 across a daylight-saving change.
-- **The month claim is a file** — `.run/almanac/<job>-YYYY-MM.json`, created with
-  `O_EXCL`. Not in-memory and not plugin storage: `setup` can run more than once for
-  a location, and only a file is atomic across those instances.
-- **Every dispatch appends to** `.run/almanac/history.jsonl`, which is what the
-  panel's session list reads.
-- **Pause is a file too** — `.run/almanac/paused.json` — because the ticker runs in
-  the server and has to see it.
-- **Run now** writes a marker the server picks up on its next tick, within a minute.
-  One dispatcher is worth the wait: two would mean two places writing the claim.
-
-All state lives in the target repo under `.run/almanac/`, never in the plugin.
+`list` returns every job with its state and runs. `pause`, `resume`, `runNow` and
+`removeJob` take `{ id }`, and `addJob` takes a job. A `changed` event fires
+whenever the schedule or a run changes.
 
 ## Requirements
 
 - OpenCode with the GUI plugin API (`@opencode/plugin/gui`). Built and tested against
-  the desktop app on server 2.3.2 / OCLI 2.2.6. **The GUI plugin API is marked
+  the desktop app on server 2.3.2 / OCLI 2.2.6. **The GUI plugin API is
   experimental** and may change between releases, so pin a tag rather than `#main`.
-- The titlebar pill, panel and session opening are desktop-only. There is no TUI
-  part: `ui.slot` is a terminal-only API and the desktop app never loads one.
-
-## Development
-
-```bash
-npm install
-npm test                  # vitest, no browser needed
-npm run build             # -> dist/gui-experimental.cjs
-```
-
-`dist/gui-experimental.cjs` is **committed on purpose**: the desktop app loads that
-file, and a git install cannot run a build step. Rebuild it after any change to
-`gui.tsx` or `rpc.ts`, or the app keeps running the old bundle.
-
-The app reloads a local plugin's GUI when the bundle changes.
+- The pill, panel and session links are desktop-only. There is no terminal UI part.
 
 ## Contributing
 
-Setup, the rule about the committed bundle, and how releases are cut are in
-[CONTRIBUTING.md](CONTRIBUTING.md). Bugs go through the issue form, which asks for
-`.run/almanac/almanac.log` first — most "it never ran" reports are answered there.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, tests and the committed bundle.
+Bugs go through the issue form.
 
 ## Licence
 
