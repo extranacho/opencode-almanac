@@ -11,7 +11,7 @@ say "the 1st at 08:00" or "Mondays at 09:00". This can.
 ## Install
 
 ```bash
-opencode plugin add "github:extranacho/opencode-almanac#v0.4.0"
+opencode plugin add "github:extranacho/opencode-almanac#v0.5.0"
 ```
 
 Then point it at your project and schedule in your **global**
@@ -22,7 +22,7 @@ window:
 {
   "plugins": [
     {
-      "package": "github:extranacho/opencode-almanac#v0.4.0",
+      "package": "github:extranacho/opencode-almanac#v0.5.0",
       "options": {
         "repo": "/absolute/path/to/your/project",
         "jobsFile": ".opencode/almanac/jobs.json"
